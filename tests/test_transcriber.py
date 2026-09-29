@@ -12,8 +12,6 @@ def test_parsers():
 
     assert parse_model_size("large-v3-turbo (最高精度・推奨)") == "large-v3-turbo"
     assert parse_model_size("small (高精度・軽量)") == "small"
-    assert parse_model_size("base (標準・高速)") == "base"
-    assert parse_model_size("tiny (最軽量・低負荷)") == "tiny"
     print("[OK] パース関数のテスト成功")
 
 

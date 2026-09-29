@@ -21,13 +21,9 @@ def parse_language_code(ui_language_text: str) -> Optional[str]:
 
 def parse_model_size(ui_model_text: str) -> str:
     """UIのモデル選択肢文字列からWhisperモデルサイズ名へ変換"""
-    if "large-v3-turbo" in ui_model_text:
-        return "large-v3-turbo"
-    elif "small" in ui_model_text:
+    if "small" in ui_model_text:
         return "small"
-    elif "tiny" in ui_model_text:
-        return "tiny"
-    return "base"
+    return "large-v3-turbo"
 
 
 class TranscriptionEngine:

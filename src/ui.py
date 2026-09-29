@@ -110,8 +110,6 @@ class AppUI(ctk.CTk):
         models = [
             "large-v3-turbo (最高精度・推奨)",
             "small (高精度・軽量)",
-            "base (標準・高速)",
-            "tiny (最軽量・低負荷)",
         ]
         self.model_option = ctk.CTkOptionMenu(header_frame, values=models)
         self.model_option.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="ew")
