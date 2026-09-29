@@ -1,17 +1,16 @@
 """
-Talk-to-Translate EXE ビルドスクリプト
-PyInstaller を使用して、配布可能なスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
+Talk-to-Translate EXE ビルドスクリプト (v1.1.0)
+PyInstaller を使用して、MossFormer2およびSenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
 """
 
 import os
-import shutil
 import subprocess
 import sys
 
 
 def build():
     print("========================================")
-    print("Talk-to-Translate EXE ビルドを開始します")
+    print("Talk-to-Translate EXE ビルドを開始します (v1.1.0)")
     print("========================================")
 
     pyinstaller_cmd = [
@@ -22,10 +21,11 @@ def build():
         "--onedir",                # 起動が最も高速で安定するフォルダ形式
         "--windowed",              # 黒いコマンドプロンプト画面を表示しない
         "--name", "Talk-to-Translate",
-        # 静的アセット・テーマの同梱
+        # 静的アセット・テーマ・設定の同梱
         "--collect-data", "customtkinter",
         "--collect-data", "sherpa_onnx",
-        # C++ / ONNX 関連DLLの同梱
+        "--collect-data", "clearvoice",
+        # C++ / ONNX / Torch 関連DLLの同梱
         "--collect-binaries", "sherpa_onnx",
         "--collect-binaries", "sherpa_onnx_core",
         "--collect-binaries", "ctranslate2",
@@ -35,6 +35,8 @@ def build():
         "--collect-submodules", "faster_whisper",
         "--collect-submodules", "sherpa_onnx",
         "--collect-submodules", "huggingface_hub",
+        "--collect-submodules", "clearvoice",
+        "--collect-submodules", "soundfile",
         # エントリーポイント
         "main.py",
     ]
