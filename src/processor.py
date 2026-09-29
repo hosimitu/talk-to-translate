@@ -1,6 +1,6 @@
 """
 Talk-to-Translate 音声処理ワーカーモジュール
-発話と無音（息継ぎ・文の切れ目）を検知し、文単位で適切に区切って文字起こしを実行します。
+発話と無音（息継ぎ・文の切れ目）を検知し、音量自動ノーマライズを施した上で文単位で文字起こしを実行します。
 """
 
 import threading
@@ -10,6 +10,34 @@ import numpy as np
 
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine
+
+
+def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: float = 6.0) -> np.ndarray:
+    """
+    音声波形の前処理（DCオフセット除去＆自動音量ノーマライズ）
+    マイクが遠い・声が小さい場合でもWhisperが最も認識しやすい音量にブーストします。
+    :param audio: 音声信号 (float32)
+    :param target_peak: 目標とするピーク音量 (0.0〜1.0)
+    :param max_gain: 最大増幅率（背景ノイズの過度な増幅を防止）
+    :return: 前処理済みの音声信号
+    """
+    if len(audio) == 0:
+        return audio
+
+    # 1. DCオフセット除去（マイク特有のバイアスをゼロ中心に補正）
+    audio = audio - np.mean(audio)
+
+    # 2. ピーク音量の検出
+    peak = float(np.max(np.abs(audio)))
+    if peak < 1e-4:
+        return audio
+
+    # 3. ゲインブースト（最大増幅率を制限した安全なスケーリング）
+    gain = min(target_peak / peak, max_gain)
+    normalized = audio * gain
+
+    # 4. クリッピング防止 (-1.0 〜 1.0 に収める)
+    return np.clip(normalized, -1.0, 1.0)
 
 
 class AudioProcessor:
@@ -135,16 +163,19 @@ class AudioProcessor:
             self._process_speech(speech_buffer, sample_rate)
 
     def _process_speech(self, buffer: list[np.ndarray], sample_rate: int):
-        """蓄積された発話音声が十分な長さであれば文字起こしを実行"""
+        """蓄積された発話音声が十分な長さであればノーマライズ後に文字起こしを実行"""
         if not buffer:
             return
 
-        audio_data = np.concatenate(buffer)
-        duration_sec = len(audio_data) / sample_rate
+        raw_audio = np.concatenate(buffer)
+        duration_sec = len(raw_audio) / sample_rate
 
         # 短すぎるノイズ（咳、クリック音等）は無視
         if duration_sec < self.min_speech_duration_sec:
             return
+
+        # ★ 自動音量ノーマライズ＆DCオフセット除去
+        audio_data = preprocess_audio(raw_audio, target_peak=0.9, max_gain=6.0)
 
         try:
             text = self.transcriber.transcribe(audio_data, language=self._language)
