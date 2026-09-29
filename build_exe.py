@@ -1,6 +1,6 @@
 """
-Talk-to-Translate EXE ビルドスクリプト (v1.1.0)
-PyInstaller を使用して、MossFormer2およびSenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
+Talk-to-Translate EXE ビルドスクリプト (v1.2.0)
+PyInstaller を使用して、NLLB-200ローカル翻訳、MossFormer2、SenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
 """
 
 import os
@@ -10,7 +10,7 @@ import sys
 
 def build():
     print("========================================")
-    print("Talk-to-Translate EXE ビルドを開始します (v1.1.0)")
+    print("Talk-to-Translate EXE ビルドを開始します (v1.2.0)")
     print("========================================")
 
     pyinstaller_cmd = [
@@ -25,6 +25,7 @@ def build():
         "--collect-data", "customtkinter",
         "--collect-data", "sherpa_onnx",
         "--collect-data", "clearvoice",
+        "--collect-data", "transformers",
         # C++ / ONNX / Torch 関連DLLの同梱
         "--collect-binaries", "sherpa_onnx",
         "--collect-binaries", "sherpa_onnx_core",
@@ -37,6 +38,7 @@ def build():
         "--collect-submodules", "huggingface_hub",
         "--collect-submodules", "clearvoice",
         "--collect-submodules", "soundfile",
+        "--collect-submodules", "transformers",
         # エントリーポイント
         "main.py",
     ]

@@ -6,7 +6,11 @@ import sounddevice as sd
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
 from src.processor import AudioProcessor
-from src.translator import TextTranslator, parse_target_language_code
+from src.translator import (
+    TextTranslator,
+    parse_target_language_code,
+    parse_source_language_code,
+)
 from src.separator import SpeechSeparator
 
 # テーマ設定
@@ -138,14 +142,30 @@ class AppUI(ctk.CTk):
         self.target_lang_option.grid(row=1, column=3, padx=10, pady=(0, 10), sticky="ew")
         self.target_lang_option.set("英語 (en)")
 
-        # 5. 音源分離チェックボックス (2行目に配置)
+        # 5. 翻訳エンジン選択 (2行目の前半)
+        engine_label = ctk.CTkLabel(header_frame, text="翻訳エンジン:", font=ctk.CTkFont(size=12, weight="bold"))
+        engine_label.grid(row=2, column=0, padx=10, pady=(6, 12), sticky="w")
+
+        engines = [
+            "クラウド翻訳 (Google/MyMemory)",
+            "ローカルAI (NLLB-200 軽量)",
+        ]
+        self.engine_option = ctk.CTkOptionMenu(
+            header_frame,
+            values=engines,
+            command=self._on_change_engine,
+        )
+        self.engine_option.grid(row=2, column=1, padx=10, pady=(6, 12), sticky="ew")
+        self.engine_option.set("クラウド翻訳 (Google/MyMemory)")
+
+        # 6. 音源分離チェックボックス (2行目の後半に配置)
         self.sep_checkbox = ctk.CTkCheckBox(
             header_frame,
             text="👥 音源分離（複数人の同時発話を分離）",
             font=ctk.CTkFont(size=12),
             command=self._on_toggle_separation,
         )
-        self.sep_checkbox.grid(row=2, column=0, columnspan=4, padx=15, pady=(5, 12), sticky="w")
+        self.sep_checkbox.grid(row=2, column=2, columnspan=2, padx=15, pady=(6, 12), sticky="w")
 
     def _build_text_areas(self):
         """中央のテキストエリア（文字起こし結果と翻訳結果の2ペイン）"""
@@ -272,16 +292,19 @@ class AppUI(ctk.CTk):
         self.transcription_queue.put(text)
 
         # バックグラウンドスレッドで翻訳処理を実行
+        source_lang = parse_source_language_code(self.input_lang_option.get())
         target_lang = parse_target_language_code(self.target_lang_option.get())
         threading.Thread(
             target=self._run_translation_thread,
-            args=(text, target_lang),
+            args=(text, target_lang, source_lang),
             daemon=True,
         ).start()
 
-    def _run_translation_thread(self, text: str, target_lang: str):
+    def _run_translation_thread(self, text: str, target_lang: str, source_lang: str = "auto"):
         """別スレッドで翻訳を実行し、翻訳キューへ追加"""
-        translated_text = self.translator.translate(text, target_lang=target_lang)
+        translated_text = self.translator.translate(
+            text, target_lang=target_lang, source_lang=source_lang
+        )
         if translated_text:
             self.translation_queue.put(translated_text)
 
@@ -315,6 +338,49 @@ class AppUI(ctk.CTk):
             self.mic_option.configure(state="normal")
             self.model_option.configure(state="normal")
             self.input_lang_option.configure(state="normal")
+            self.engine_option.configure(state="normal")
+
+    def _on_change_engine(self, selected_engine: str):
+        """翻訳エンジンの切替ハンドラ"""
+        if "ローカルAI" in selected_engine:
+            self.translator.set_engine("local")
+            if not (self.translator.local_translator and self.translator.local_translator._is_loaded):
+                self.status_label.configure(
+                    text="ローカル翻訳モデル (NLLB-200) を準備中...",
+                    text_color="#ffc107",
+                )
+
+                def load_local():
+                    try:
+                        self.translator.ensure_local_loaded()
+                        self.after(
+                            0,
+                            lambda: self.status_label.configure(
+                                text="ステータス: 準備完了 (ローカルAI翻訳)",
+                                text_color="#28a745",
+                            ),
+                        )
+                    except Exception as e:
+                        self.after(
+                            0,
+                            lambda: self.status_label.configure(
+                                text=f"ローカル翻訳読込失敗: {e}",
+                                text_color="#dc3545",
+                            ),
+                        )
+
+                threading.Thread(target=load_local, daemon=True).start()
+            else:
+                self.status_label.configure(
+                    text="ステータス: 準備完了 (ローカルAI翻訳)",
+                    text_color="#28a745",
+                )
+        else:
+            self.translator.set_engine("cloud")
+            self.status_label.configure(
+                text="ステータス: 準備完了 (クラウド翻訳)",
+                text_color="#28a745",
+            )
 
     def _on_toggle_separation(self):
         """音源分離チェックボックスの切替ハンドラ"""
@@ -366,6 +432,7 @@ class AppUI(ctk.CTk):
                 self.mic_option.configure(state="disabled")
                 self.model_option.configure(state="disabled")
                 self.input_lang_option.configure(state="disabled")
+                self.engine_option.configure(state="disabled")
 
             self.after(0, update_ui_on_success)
 
