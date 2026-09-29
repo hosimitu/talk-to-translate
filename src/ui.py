@@ -104,16 +104,17 @@ class AppUI(ctk.CTk):
             self.mic_option.set(mics[0])
 
         # 2. 文字起こしモデル選択
-        model_label = ctk.CTkLabel(header_frame, text="AIモデル (Whisper):", font=ctk.CTkFont(size=12, weight="bold"))
+        model_label = ctk.CTkLabel(header_frame, text="AIモデル:", font=ctk.CTkFont(size=12, weight="bold"))
         model_label.grid(row=0, column=1, padx=10, pady=(10, 0), sticky="w")
         
         models = [
-            "large-v3-turbo (最高精度・推奨)",
-            "small (高精度・軽量)",
+            "SenseVoice-Small (超高速・日中英推奨)",
+            "Whisper: large-v3-turbo (高精度)",
+            "Whisper: small (軽量)",
         ]
         self.model_option = ctk.CTkOptionMenu(header_frame, values=models)
         self.model_option.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="ew")
-        self.model_option.set("large-v3-turbo (最高精度・推奨)")
+        self.model_option.set("SenseVoice-Small (超高速・日中英推奨)")
 
         # 3. 入力音声言語
         lang_label = ctk.CTkLabel(header_frame, text="入力言語 (音声):", font=ctk.CTkFont(size=12, weight="bold"))
