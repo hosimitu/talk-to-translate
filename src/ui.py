@@ -107,10 +107,15 @@ class AppUI(ctk.CTk):
         model_label = ctk.CTkLabel(header_frame, text="AIモデル (Whisper):", font=ctk.CTkFont(size=12, weight="bold"))
         model_label.grid(row=0, column=1, padx=10, pady=(10, 0), sticky="w")
         
-        models = ["tiny (最速・軽量)", "base (標準)", "small (高精度・要スペック)"]
+        models = [
+            "large-v3-turbo (最高精度・推奨)",
+            "small (高精度・軽量)",
+            "base (標準・高速)",
+            "tiny (最軽量・低負荷)",
+        ]
         self.model_option = ctk.CTkOptionMenu(header_frame, values=models)
         self.model_option.grid(row=1, column=1, padx=10, pady=(0, 10), sticky="ew")
-        self.model_option.set("base (標準)")
+        self.model_option.set("large-v3-turbo (最高精度・推奨)")
 
         # 3. 入力音声言語
         lang_label = ctk.CTkLabel(header_frame, text="入力言語 (音声):", font=ctk.CTkFont(size=12, weight="bold"))
@@ -308,12 +313,13 @@ class AppUI(ctk.CTk):
             else:
                 self.transcriber.change_model(model_size=model_name)
 
-            # 音声プロセッサの初期化
+            # 音声プロセッサの初期化 (文単位のVAD処理)
             self.processor = AudioProcessor(
                 recorder=self.recorder,
                 transcriber=self.transcriber,
                 on_transcription_callback=self._on_transcription_received,
-                chunk_duration_sec=3.0,
+                silence_threshold=0.015,
+                silence_duration_sec=0.8,
             )
 
             # マイク録音開始

@@ -21,22 +21,24 @@ def parse_language_code(ui_language_text: str) -> Optional[str]:
 
 def parse_model_size(ui_model_text: str) -> str:
     """UIのモデル選択肢文字列からWhisperモデルサイズ名へ変換"""
-    if "tiny" in ui_model_text:
-        return "tiny"
+    if "large-v3-turbo" in ui_model_text:
+        return "large-v3-turbo"
     elif "small" in ui_model_text:
         return "small"
+    elif "tiny" in ui_model_text:
+        return "tiny"
     return "base"
 
 
 class TranscriptionEngine:
     """faster-whisper をラップした文字起こしエンジン"""
 
-    def __init__(self, model_size: str = "base", device: str = "cpu", compute_type: str = "int8"):
+    def __init__(self, model_size: str = "large-v3-turbo", device: str = "cpu", compute_type: str = "int8"):
         """
         初期化
-        :param model_size: "tiny", "base", "small" 等
-        :param device: "cpu" (一般的なPC環境)
-        :param compute_type: CPUで最速・省メモリの "int8"
+        :param model_size: "tiny", "base", "small", "large-v3-turbo"
+        :param device: "cpu"
+        :param compute_type: "int8"
         """
         self.model_size = model_size
         self.device = device
@@ -60,21 +62,32 @@ class TranscriptionEngine:
 
     def transcribe(self, audio_data: np.ndarray, language: Optional[str] = None) -> str:
         """
-        音声データ（numpy配列, 16000Hz float32）を文字起こしする
-        :param audio_data: 音声信号
-        :param language: 言語コード ("ja", "en", "zh") または None (自動検出)
+        音声データを高精度に文字起こしする
+        :param audio_data: 音声信号 (16000Hz, float32)
+        :param language: 言語コード ("ja", "en", "zh") または None
         :return: 文字起こしテキスト
         """
         if self.model is None or len(audio_data) == 0:
             return ""
 
-        # 無音フィルタ（VAD）を有効化して不要な無音区間の処理をスキップ
+        # 言語ごとの初期プロンプト（漢字変換や句読点の精度向上用ヒント）
+        initial_prompt = None
+        if language == "ja":
+            initial_prompt = "こんにちは。日本語の会話をリアルタイムで文字起こしします。よろしくお願いします。"
+        elif language == "zh":
+            initial_prompt = "你好，正在进行语音转文字。"
+
         segments, _ = self.model.transcribe(
             audio_data,
             language=language,
+            initial_prompt=initial_prompt,
             vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500),
+            vad_parameters=dict(
+                min_silence_duration_ms=400,
+                threshold=0.3,
+            ),
             beam_size=3,
+            temperature=0.0,
         )
 
         texts = [segment.text.strip() for segment in segments if segment.text.strip()]
