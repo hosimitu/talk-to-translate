@@ -3,10 +3,13 @@ Talk-to-Translate UIモジュール
 CustomTkinterによるモダンなデスクトップGUIを提供します。
 """
 
+import threading
 import tkinter as tk
 import customtkinter as ctk
 import sounddevice as sd
 from src.audio import AudioRecorder
+from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
+from src.processor import AudioProcessor
 
 # テーマ設定
 ctk.set_appearance_mode("Dark")
@@ -25,6 +28,10 @@ class AppUI(ctk.CTk):
 
         # 音声レコーダーの初期化
         self.recorder = AudioRecorder(sample_rate=16000)
+
+        # 文字起こしエンジン & プロセッサ
+        self.transcriber: TranscriptionEngine | None = None
+        self.processor: AudioProcessor | None = None
 
         # 録音中フラグ
         self.is_recording = False
@@ -215,28 +222,82 @@ class AppUI(ctk.CTk):
         except Exception:
             return None
 
+    def _on_transcription_received(self, text: str):
+        """バックグラウンドスレッドからの文字起こし結果を受け取りUIへ反映"""
+        # メインスレッドでUI更新
+        self.after(0, self.append_transcription, text)
+
     def _toggle_recording(self):
-        """録音ボタンのトグル動作（マイクストリームの開始・停止）"""
-        if not self.recorder.is_recording:
-            try:
-                device_index = self._get_selected_device_index()
-                self.recorder.start(device_index=device_index)
-                self.is_recording = True
-                self.record_button.configure(text="録音停止", fg_color="#dc3545", hover_color="#c82333")
-                self.status_label.configure(text="ステータス: 録音中...", text_color="#28a745")
-                # 録音中はデバイス等の設定変更を無効化
-                self.mic_option.configure(state="disabled")
-                self.model_option.configure(state="disabled")
-            except Exception as e:
-                self.status_label.configure(text=f"エラー: マイク起動失敗 ({e})", text_color="#dc3545")
+        """録音ボタンのトグル動作（マイクストリーム＆文字起こしエンジンの開始・停止）"""
+        if not self.is_recording:
+            # 録音開始前の準備
+            device_index = self._get_selected_device_index()
+            model_name = parse_model_size(self.model_option.get())
+            lang_code = parse_language_code(self.input_lang_option.get())
+
+            self.status_label.configure(text=f"モデル準備中 ({model_name})...", text_color="#ffc107")
+            self.record_button.configure(state="disabled")
+
+            # モデルの初期化またはロードを別スレッドで実行してUIフリーズを回避
+            threading.Thread(
+                target=self._start_recording_thread,
+                args=(device_index, model_name, lang_code),
+                daemon=True,
+            ).start()
         else:
+            # 録音停止
+            if self.processor:
+                self.processor.stop()
             self.recorder.stop()
             self.is_recording = False
+
             self.record_button.configure(text="録音開始", fg_color="#28a745", hover_color="#218838")
             self.status_label.configure(text="ステータス: 停止中", text_color="gray")
             # 設定変更を再度有効化
             self.mic_option.configure(state="normal")
             self.model_option.configure(state="normal")
+            self.input_lang_option.configure(state="normal")
+
+    def _start_recording_thread(self, device_index: int | None, model_name: str, lang_code: str | None):
+        """録音および文字起こしのバックグラウンド初期化・開始"""
+        try:
+            # モデルのロードまたは切替
+            if self.transcriber is None:
+                self.transcriber = TranscriptionEngine(model_size=model_name)
+            else:
+                self.transcriber.change_model(model_size=model_name)
+
+            # 音声プロセッサの初期化
+            self.processor = AudioProcessor(
+                recorder=self.recorder,
+                transcriber=self.transcriber,
+                on_transcription_callback=self._on_transcription_received,
+                chunk_duration_sec=3.0,
+            )
+
+            # マイク録音開始
+            self.recorder.start(device_index=device_index)
+            # ワーカー開始
+            self.processor.start(language=lang_code)
+
+            self.is_recording = True
+
+            # UIの更新をメインスレッドへディスパッチ
+            def update_ui_on_success():
+                self.record_button.configure(text="録音停止", fg_color="#dc3545", hover_color="#c82333", state="normal")
+                self.status_label.configure(text="ステータス: 録音中...", text_color="#28a745")
+                self.mic_option.configure(state="disabled")
+                self.model_option.configure(state="disabled")
+                self.input_lang_option.configure(state="disabled")
+
+            self.after(0, update_ui_on_success)
+
+        except Exception as e:
+            def update_ui_on_error():
+                self.status_label.configure(text=f"エラー: 開始失敗 ({e})", text_color="#dc3545")
+                self.record_button.configure(state="normal")
+
+            self.after(0, update_ui_on_error)
 
     def _copy_transcription(self):
         """文字起こしテキストのクリップボードコピー"""
