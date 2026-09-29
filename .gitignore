@@ -45,3 +45,5 @@ talk-to-translate.code-workspace
 # Audio / Models temporary files
 *.wav
 models/
+checkpoints/
+
