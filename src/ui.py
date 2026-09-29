@@ -1,8 +1,4 @@
-"""
-Talk-to-Translate UIモジュール
-CustomTkinterによるモダンなデスクトップGUIを提供します。
-"""
-
+import queue
 import threading
 import tkinter as tk
 import customtkinter as ctk
@@ -10,6 +6,7 @@ import sounddevice as sd
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
 from src.processor import AudioProcessor
+from src.translator import TextTranslator, parse_target_language_code
 
 # テーマ設定
 ctk.set_appearance_mode("Dark")
@@ -33,6 +30,13 @@ class AppUI(ctk.CTk):
         self.transcriber: TranscriptionEngine | None = None
         self.processor: AudioProcessor | None = None
 
+        # 翻訳エンジン
+        self.translator = TextTranslator(source_lang="auto")
+
+        # スレッド間通信用キュー
+        self.transcription_queue: queue.Queue[str] = queue.Queue()
+        self.translation_queue: queue.Queue[str] = queue.Queue()
+
         # 録音中フラグ
         self.is_recording = False
 
@@ -44,6 +48,30 @@ class AppUI(ctk.CTk):
         self._build_header_panel()
         self._build_text_areas()
         self._build_footer_panel()
+
+        # キューの監視ループを開始
+        self._poll_queues()
+
+    def _poll_queues(self):
+        """ワーカースレッドからのキューをメインスレッドで安全に処理"""
+        # 文字起こしキューの処理
+        while not self.transcription_queue.empty():
+            try:
+                text = self.transcription_queue.get_nowait()
+                self.append_transcription(text)
+            except queue.Empty:
+                break
+
+        # 翻訳キューの処理
+        while not self.translation_queue.empty():
+            try:
+                translated_text = self.translation_queue.get_nowait()
+                self.append_translation(translated_text)
+            except queue.Empty:
+                break
+
+        # 50ミリ秒ごとに再帰チェック
+        self.after(50, self._poll_queues)
 
     def _get_audio_input_devices(self) -> list[str]:
         """利用可能なマイク（入力）デバイスの一覧を取得"""
@@ -223,9 +251,22 @@ class AppUI(ctk.CTk):
             return None
 
     def _on_transcription_received(self, text: str):
-        """バックグラウンドスレッドからの文字起こし結果を受け取りUIへ反映"""
-        # メインスレッドでUI更新
-        self.after(0, self.append_transcription, text)
+        """バックグラウンドスレッドからの文字起こし結果を受け取りキューへ追加＆翻訳実行"""
+        self.transcription_queue.put(text)
+
+        # バックグラウンドスレッドで翻訳処理を実行
+        target_lang = parse_target_language_code(self.target_lang_option.get())
+        threading.Thread(
+            target=self._run_translation_thread,
+            args=(text, target_lang),
+            daemon=True,
+        ).start()
+
+    def _run_translation_thread(self, text: str, target_lang: str):
+        """別スレッドで翻訳を実行し、翻訳キューへ追加"""
+        translated_text = self.translator.translate(text, target_lang=target_lang)
+        if translated_text:
+            self.translation_queue.put(translated_text)
 
     def _toggle_recording(self):
         """録音ボタンのトグル動作（マイクストリーム＆文字起こしエンジンの開始・停止）"""
