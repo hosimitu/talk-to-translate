@@ -39,6 +39,7 @@ env/
 # IDEs
 .vscode/
 .idea/
+talk-to-translate.code-workspace
 
 # Audio / Models temporary files
 *.wav
