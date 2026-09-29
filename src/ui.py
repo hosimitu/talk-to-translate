@@ -7,6 +7,7 @@ from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
 from src.processor import AudioProcessor
 from src.translator import TextTranslator, parse_target_language_code
+from src.separator import SpeechSeparator
 
 # テーマ設定
 ctk.set_appearance_mode("Dark")
@@ -20,8 +21,8 @@ class AppUI(ctk.CTk):
         super().__init__()
 
         self.title("Talk-to-Translate")
-        self.geometry("900x700")
-        self.minsize(800, 600)
+        self.geometry("900x720")
+        self.minsize(800, 620)
 
         # 音声レコーダーの初期化
         self.recorder = AudioRecorder(sample_rate=16000)
@@ -29,6 +30,9 @@ class AppUI(ctk.CTk):
         # 文字起こしエンジン & プロセッサ
         self.transcriber: TranscriptionEngine | None = None
         self.processor: AudioProcessor | None = None
+
+        # 音源分離エンジン
+        self.separator = SpeechSeparator()
 
         # 翻訳エンジン
         self.translator = TextTranslator(source_lang="auto")
@@ -125,7 +129,7 @@ class AppUI(ctk.CTk):
         self.input_lang_option.grid(row=1, column=2, padx=10, pady=(0, 10), sticky="ew")
         self.input_lang_option.set("自動検出 (auto)")
 
-        # 4. 翻訳先言語 & 翻訳有効スイッチ
+        # 4. 翻訳先言語
         trans_label = ctk.CTkLabel(header_frame, text="翻訳先言語:", font=ctk.CTkFont(size=12, weight="bold"))
         trans_label.grid(row=0, column=3, padx=10, pady=(10, 0), sticky="w")
         
@@ -133,6 +137,15 @@ class AppUI(ctk.CTk):
         self.target_lang_option = ctk.CTkOptionMenu(header_frame, values=target_languages)
         self.target_lang_option.grid(row=1, column=3, padx=10, pady=(0, 10), sticky="ew")
         self.target_lang_option.set("英語 (en)")
+
+        # 5. 音源分離チェックボックス (2行目に配置)
+        self.sep_checkbox = ctk.CTkCheckBox(
+            header_frame,
+            text="👥 音源分離（複数人の同時発話を分離）",
+            font=ctk.CTkFont(size=12),
+            command=self._on_toggle_separation,
+        )
+        self.sep_checkbox.grid(row=2, column=0, columnspan=4, padx=15, pady=(5, 12), sticky="w")
 
     def _build_text_areas(self):
         """中央のテキストエリア（文字起こし結果と翻訳結果の2ペイン）"""
@@ -303,6 +316,22 @@ class AppUI(ctk.CTk):
             self.model_option.configure(state="normal")
             self.input_lang_option.configure(state="normal")
 
+    def _on_toggle_separation(self):
+        """音源分離チェックボックスの切替ハンドラ"""
+        is_enabled = (self.sep_checkbox.get() == 1)
+        if self.processor:
+            self.processor.enable_separation = is_enabled
+
+        if is_enabled and not self.separator._is_loaded:
+            self.status_label.configure(text="MossFormer音源分離モデルを読み込み中...", text_color="#ffc107")
+            def load_thread():
+                try:
+                    self.separator.load_model()
+                    self.after(0, lambda: self.status_label.configure(text="音源分離モデル準備完了", text_color="#28a745"))
+                except Exception as e:
+                    self.after(0, lambda: self.status_label.configure(text=f"音源分離読込失敗: {e}", text_color="#dc3545"))
+            threading.Thread(target=load_thread, daemon=True).start()
+
     def _start_recording_thread(self, device_index: int | None, model_name: str, lang_code: str | None):
         """録音および文字起こしのバックグラウンド初期化・開始"""
         try:
@@ -312,14 +341,16 @@ class AppUI(ctk.CTk):
             else:
                 self.transcriber.change_model(model_size=model_name)
 
-            # 音声プロセッサの初期化 (文単位のVAD処理)
+            # 音声プロセッサの初期化 (文単位のVAD処理 + 音源分離)
             self.processor = AudioProcessor(
                 recorder=self.recorder,
                 transcriber=self.transcriber,
                 on_transcription_callback=self._on_transcription_received,
+                separator=self.separator,
                 silence_threshold=0.015,
                 silence_duration_sec=0.8,
             )
+            self.processor.enable_separation = (self.sep_checkbox.get() == 1)
 
             # マイク録音開始
             self.recorder.start(device_index=device_index)
