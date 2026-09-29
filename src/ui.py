@@ -6,6 +6,7 @@ CustomTkinterによるモダンなデスクトップGUIを提供します。
 import tkinter as tk
 import customtkinter as ctk
 import sounddevice as sd
+from src.audio import AudioRecorder
 
 # テーマ設定
 ctk.set_appearance_mode("Dark")
@@ -21,6 +22,9 @@ class AppUI(ctk.CTk):
         self.title("Talk-to-Translate")
         self.geometry("900x700")
         self.minsize(800, 600)
+
+        # 音声レコーダーの初期化
+        self.recorder = AudioRecorder(sample_rate=16000)
 
         # 録音中フラグ
         self.is_recording = False
@@ -201,15 +205,38 @@ class AppUI(ctk.CTk):
         )
         self.clear_button.grid(row=0, column=2, padx=20, pady=15, sticky="e")
 
+    def _get_selected_device_index(self) -> int | None:
+        """選択されているマイクのデバイス番号を取得"""
+        selected = self.mic_option.get()
+        try:
+            # "0: デバイス名" の形式から数字部分を抽出
+            device_id_str = selected.split(":")[0].strip()
+            return int(device_id_id) if (device_id_id := device_id_str).isdigit() else None
+        except Exception:
+            return None
+
     def _toggle_recording(self):
-        """録音ボタンのトグル動作（モック）"""
-        self.is_recording = not self.is_recording
-        if self.is_recording:
-            self.record_button.configure(text="録音停止", fg_color="#dc3545", hover_color="#c82333")
-            self.status_label.configure(text="ステータス: 録音中...", text_color="#28a745")
+        """録音ボタンのトグル動作（マイクストリームの開始・停止）"""
+        if not self.recorder.is_recording:
+            try:
+                device_index = self._get_selected_device_index()
+                self.recorder.start(device_index=device_index)
+                self.is_recording = True
+                self.record_button.configure(text="録音停止", fg_color="#dc3545", hover_color="#c82333")
+                self.status_label.configure(text="ステータス: 録音中...", text_color="#28a745")
+                # 録音中はデバイス等の設定変更を無効化
+                self.mic_option.configure(state="disabled")
+                self.model_option.configure(state="disabled")
+            except Exception as e:
+                self.status_label.configure(text=f"エラー: マイク起動失敗 ({e})", text_color="#dc3545")
         else:
+            self.recorder.stop()
+            self.is_recording = False
             self.record_button.configure(text="録音開始", fg_color="#28a745", hover_color="#218838")
             self.status_label.configure(text="ステータス: 停止中", text_color="gray")
+            # 設定変更を再度有効化
+            self.mic_option.configure(state="normal")
+            self.model_option.configure(state="normal")
 
     def _copy_transcription(self):
         """文字起こしテキストのクリップボードコピー"""
