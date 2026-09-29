@@ -54,10 +54,15 @@ pip install -r requirements.txt
 
 ### 3. アプリケーションの起動
 
-**方法 A: バッチファイルから起動（おすすめ）**
-エクスプローラーで **[`run.bat`](file:///c:/github/talk-to-translate/run.bat)** をダブルクリックするだけで起動できます。
+**方法 A: ビルド済みEXEから起動（最もおすすめ・黒い画面なし）**
+1. 初回のみ `python build_exe.py` を実行してEXEをビルドします。
+2. 生成された **`dist\Talk-to-Translate\Talk-to-Translate.exe`** をダブルクリックするだけで、コマンド画面なしにアプリ単体で高速起動します。
+   （デスクトップ等にショートカットを作成しておくと便利です）
 
-**方法 B: コマンドラインから起動**
+**方法 B: バッチファイルから起動**
+エクスプローラーで **[`run.bat`](file:///c:/github/talk-to-translate/run.bat)** をダブルクリックします。
+
+**方法 C: コマンドラインから起動**
 ```powershell
 python main.py
 # または
