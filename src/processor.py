@@ -43,7 +43,7 @@ class AudioProcessor:
         transcriber: TranscriptionEngine,
         on_transcription_callback: Callable[[str], None],
         separator: Optional[SpeechSeparator] = None,
-        silence_threshold: float = 0.015,
+        silence_threshold: float = 0.03,
         silence_duration_sec: float = 0.8,
         min_speech_duration_sec: float = 1.0,
         max_speech_duration_sec: float = 8.0,

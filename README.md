@@ -28,6 +28,8 @@
   - 自動最下部スクロール対応＆ワンクリックの **「コピー」** ボタンをそれぞれに完備。
 - **マイク選択機能**:
   - PCに接続されているマイク（入力デバイス）をアプリ内で自由に切り替え可能。
+- **設定の自動保存・復元（永続化）**:
+  - 選択した文字起こしモデル、翻訳エンジン/モデル、入力言語、翻訳先言語、マイクデバイス、音源分離のON/OFFが自動保存（`config.json`）され、次回起動時に前回の設定が自動で復元されます。EXE実行時や管理者権限フォルダでも安全に動作します。
 
 ---
 
@@ -98,6 +100,7 @@ python main.py
 ```powershell
 $env:PYTHONPATH="."
 $env:PYTHONIOENCODING="utf-8"
+python tests/test_config.py
 python tests/test_transcriber.py
 python tests/test_translator.py
 ```

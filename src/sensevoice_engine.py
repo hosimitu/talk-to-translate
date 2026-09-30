@@ -24,9 +24,10 @@ class SenseVoiceEngine:
         """
         self.num_threads = num_threads
         self.recognizer: Optional[sherpa_onnx.OfflineRecognizer] = None
-        self._load_model()
+        self._current_language = "auto"
+        self._load_model(self._current_language)
 
-    def _load_model(self):
+    def _load_model(self, language: str):
         """HuggingFace Hub からモデルを取得し sherpa-onnx でロード"""
         model_path = huggingface_hub.hf_hub_download(
             repo_id=self.REPO_ID,
@@ -42,7 +43,9 @@ class SenseVoiceEngine:
             tokens=tokens_path,
             num_threads=self.num_threads,
             use_itn=True,
+            language=language if language != "auto" else "auto",
         )
+        self._current_language = language
 
     def transcribe(self, audio_data: np.ndarray, language: Optional[str] = None) -> str:
         """
@@ -51,6 +54,10 @@ class SenseVoiceEngine:
         :param language: 言語指定 ("ja", "zh", "en" または None)
         :return: 整形済み文字起こしテキスト
         """
+        target_lang = language if language else "auto"
+        if self.recognizer is None or self._current_language != target_lang:
+            self._load_model(target_lang)
+
         if self.recognizer is None or len(audio_data) == 0:
             return ""
 

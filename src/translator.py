@@ -49,8 +49,11 @@ def detect_language(text: str) -> str:
 class LocalNLLBTranslator:
     """CTranslate2 と NLLB-200 (int8量子化) を用いたローカルAI翻訳エンジン"""
 
-    REPO_ID = "JustFrederik/nllb-200-distilled-600M-ct2-int8"
-    CHECKPOINTS_DIR = os.path.join("checkpoints", "nllb-200-distilled-600M-ct2-int8")
+    MODELS = {
+        "nllb-600M": "JustFrederik/nllb-200-distilled-600M-ct2-int8",
+        "nllb-1.3B": "JustFrederik/nllb-200-1.3B-ct2-int8",
+        "nllb-3.3B": "JustFrederik/nllb-200-3.3B-ct2-int8",
+    }
 
     NLLB_LANG_CODES = {
         "ja": "jpn_Jpan",
@@ -59,8 +62,11 @@ class LocalNLLBTranslator:
         "zh": "zho_Hans",
     }
 
-    def __init__(self, checkpoints_dir: Optional[str] = None):
-        self.checkpoints_dir = checkpoints_dir or self.CHECKPOINTS_DIR
+    def __init__(self, model_name: str = "nllb-600M", checkpoints_dir: Optional[str] = None):
+        self.model_name = model_name
+        self.repo_id = self.MODELS.get(model_name, self.MODELS["nllb-600M"])
+        default_checkpoint = os.path.join("checkpoints", self.repo_id.split("/")[-1])
+        self.checkpoints_dir = checkpoints_dir or default_checkpoint
         self.translator = None
         self.tokenizer = None
         self._is_loaded = False
@@ -71,7 +77,7 @@ class LocalNLLBTranslator:
             return
 
         if progress_callback:
-            progress_callback("ローカル翻訳モデル (NLLB-200) の準備・ロード中...")
+            progress_callback(f"ローカル翻訳モデル ({self.model_name}) の準備・ロード中...")
 
         # Hugging Face Hubから必要ファイルをダウンロード（キャッシュがあればスキップ）
         from huggingface_hub import snapshot_download
@@ -81,7 +87,7 @@ class LocalNLLBTranslator:
         # TransformersのMistral用正規表現誤検知警告を抑制
         hf_utils.logging.set_verbosity_error()
 
-        model_dir = snapshot_download(repo_id=self.REPO_ID, local_dir=self.checkpoints_dir)
+        model_dir = snapshot_download(repo_id=self.repo_id, local_dir=self.checkpoints_dir)
 
         # GPUが使える場合はCUDA、それ以外はCPUでint8高速推論
         device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
@@ -123,6 +129,7 @@ class LocalNLLBTranslator:
             results = self.translator.translate_batch(
                 [source_tokens],
                 target_prefix=[[tgt_nllb]],
+                beam_size=5,
             )
             target_tokens = results[0].hypotheses[0][1:]
             translated = self.tokenizer.decode(self.tokenizer.convert_tokens_to_ids(target_tokens)).strip()
@@ -140,6 +147,7 @@ class TextTranslator:
         source_lang: str = "auto",
         cooldown_sec: float = 300.0,
         engine: str = "cloud",
+        nllb_model: str = "nllb-600M",
     ):
         """
         初期化
@@ -150,12 +158,19 @@ class TextTranslator:
         self.source_lang = source_lang
         self.cooldown_sec = cooldown_sec
         self.engine = engine  # "cloud" または "local"
+        self.nllb_model = nllb_model
 
         # Google翻訳の再開予定時刻（0なら使用可能）
         self._google_disabled_until = 0.0
 
         # ローカル翻訳エンジン（初期化は遅延）
         self.local_translator: Optional[LocalNLLBTranslator] = None
+
+    def set_nllb_model(self, nllb_model: str):
+        """ローカル翻訳モデルを変更する"""
+        if self.nllb_model != nllb_model:
+            self.nllb_model = nllb_model
+            self.local_translator = None  # 強制リロード
 
     def set_engine(self, engine: str):
         """翻訳エンジンを切り替える ("cloud" または "local")"""
@@ -164,7 +179,7 @@ class TextTranslator:
     def ensure_local_loaded(self, progress_callback: Optional[Callable[[str], None]] = None):
         """ローカル翻訳モデルが未ロードなら事前ロードする"""
         if self.local_translator is None:
-            self.local_translator = LocalNLLBTranslator()
+            self.local_translator = LocalNLLBTranslator(model_name=self.nllb_model)
         self.local_translator.load_model(progress_callback=progress_callback)
 
     def _get_mymemory_lang(self, lang: str) -> str:
@@ -196,7 +211,11 @@ class TextTranslator:
 
         # 2. MyMemoryTranslator による高速翻訳
         try:
-            s_lang = self._get_mymemory_lang(source_lang)
+            if source_lang == "auto":
+                detected = detect_language(text)
+                s_lang = self._get_mymemory_lang(detected)
+            else:
+                s_lang = self._get_mymemory_lang(source_lang)
             t_lang = self._get_mymemory_lang(target_lang)
             if s_lang == t_lang:
                 return text
@@ -233,7 +252,7 @@ class TextTranslator:
         if self.engine == "local":
             try:
                 if self.local_translator is None:
-                    self.local_translator = LocalNLLBTranslator()
+                    self.local_translator = LocalNLLBTranslator(model_name=self.nllb_model)
                 return self.local_translator.translate(
                     stripped_text,
                     source_lang=effective_source_lang,
