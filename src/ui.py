@@ -19,6 +19,20 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
 
+def get_preferred_font(size: int = 16, weight: str = "normal") -> ctk.CTkFont:
+    """環境に応じた視認性の高いフォント（Windows: Yu Gothic UI / Meiryo / BIZ UDPGothic など）を取得"""
+    candidates = ["Yu Gothic UI", "BIZ UDPGothic", "Meiryo", "Hiragino Sans", "Noto Sans CJK JP"]
+    try:
+        import tkinter.font as tkfont
+        available = set(tkfont.families())
+        for fam in candidates:
+            if fam in available:
+                return ctk.CTkFont(family=fam, size=size, weight=weight)
+    except Exception:
+        pass
+    return ctk.CTkFont(family="Yu Gothic UI", size=size, weight=weight)
+
+
 class AppUI(ctk.CTk):
     """メインアプリケーションウィンドウ"""
 
@@ -254,6 +268,9 @@ class AppUI(ctk.CTk):
         left_frame.grid_rowconfigure(1, weight=1)
         left_frame.grid_columnconfigure(0, weight=1)
 
+        # テキストエリア用フォント（視認性向上のため16pt & UDフォント）
+        textbox_font = get_preferred_font(size=16)
+
         # 文字起こしヘッダー (ラベル & コピーボタン)
         transcribe_header = ctk.CTkFrame(left_frame, fg_color="transparent")
         transcribe_header.grid(row=0, column=0, padx=15, pady=(10, 5), sticky="ew")
@@ -262,7 +279,7 @@ class AppUI(ctk.CTk):
         transcribe_title = ctk.CTkLabel(
             transcribe_header, 
             text="🎙️ 文字起こし結果", 
-            font=ctk.CTkFont(size=14, weight="bold")
+            font=get_preferred_font(size=15, weight="bold")
         )
         transcribe_title.grid(row=0, column=0, sticky="w")
 
@@ -275,9 +292,15 @@ class AppUI(ctk.CTk):
         )
         self.copy_transcribe_btn.grid(row=0, column=1, sticky="e")
 
-        # 文字起こしテキストボックス
-        self.transcribe_textbox = ctk.CTkTextbox(left_frame, wrap="word", font=ctk.CTkFont(size=13))
+        # 文字起こしテキストボックス（文字サイズ拡大・行間調整・視認性の高い配色）
+        self.transcribe_textbox = ctk.CTkTextbox(
+            left_frame,
+            wrap="word",
+            font=textbox_font,
+            text_color=("#1a1a1a", "#f8f9fa"),
+        )
         self.transcribe_textbox.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="nsew")
+        self.transcribe_textbox._textbox.configure(spacing1=2, spacing2=4, spacing3=4)
 
         # --- 右側: 翻訳結果 ---
         right_frame = ctk.CTkFrame(content_frame, corner_radius=10)
@@ -293,7 +316,7 @@ class AppUI(ctk.CTk):
         translate_title = ctk.CTkLabel(
             translate_header, 
             text="🌐 翻訳結果", 
-            font=ctk.CTkFont(size=14, weight="bold")
+            font=get_preferred_font(size=15, weight="bold")
         )
         translate_title.grid(row=0, column=0, sticky="w")
 
@@ -306,9 +329,15 @@ class AppUI(ctk.CTk):
         )
         self.copy_translate_btn.grid(row=0, column=1, sticky="e")
 
-        # 翻訳テキストボックス
-        self.translate_textbox = ctk.CTkTextbox(right_frame, wrap="word", font=ctk.CTkFont(size=13))
+        # 翻訳テキストボックス（文字サイズ拡大・行間調整・視認性の高い配色）
+        self.translate_textbox = ctk.CTkTextbox(
+            right_frame,
+            wrap="word",
+            font=textbox_font,
+            text_color=("#1a1a1a", "#f8f9fa"),
+        )
         self.translate_textbox.grid(row=1, column=0, padx=15, pady=(0, 15), sticky="nsew")
+        self.translate_textbox._textbox.configure(spacing1=2, spacing2=4, spacing3=4)
 
     def _build_footer_panel(self):
         """下部のコントロール・ステータスパネル"""

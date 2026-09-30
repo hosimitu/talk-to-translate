@@ -60,5 +60,22 @@ def test_ui_config_persistence():
             app.destroy()
 
 
+def test_ui_text_styling():
+    """テキストボックスのフォントサイズおよび行間設定をテスト"""
+    app = AppUI()
+    try:
+        app.withdraw()
+        # フォントサイズが 16 であること
+        assert app.transcribe_textbox.cget("font").cget("size") == 16
+        assert app.translate_textbox.cget("font").cget("size") == 16
+        # 行間が設定されていること
+        assert app.transcribe_textbox._textbox.cget("spacing2") == 4
+        assert app.translate_textbox._textbox.cget("spacing2") == 4
+        print("[OK] UIテキストスタイリング（フォントサイズ・行間）テスト成功")
+    finally:
+        app.destroy()
+
+
 if __name__ == "__main__":
     test_ui_config_persistence()
+    test_ui_text_styling()
