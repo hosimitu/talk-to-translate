@@ -12,7 +12,7 @@ from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "transcription_model": "SenseVoice-Small (超高速・日中英推奨)",
-    "translation_engine": "クラウド翻訳 (Google/MyMemory)",
+    "translation_engine": "クラウド翻訳 (Google/MyMemory) (推奨)",
     "input_lang": "自動検出 (auto)",
     "target_lang": "英語 (en)",
     "enable_separation": False,

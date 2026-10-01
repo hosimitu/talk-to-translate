@@ -1,8 +1,8 @@
 {
   "transcription_model": "Whisper: large-v3-turbo (高精度)",
-  "translation_engine": "ローカル翻訳 (NLLB 600M)",
+  "translation_engine": "クラウド翻訳 (Google/MyMemory) (推奨)",
   "input_lang": "自動検出 (auto)",
-  "target_lang": "英語 (en)",
+  "target_lang": "日本語 (ja)",
   "enable_separation": false,
   "mic_device": "0: Microsoft サウンド マッパー - Input"
 }

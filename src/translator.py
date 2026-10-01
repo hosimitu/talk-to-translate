@@ -52,7 +52,7 @@ class LocalNLLBTranslator:
     MODELS = {
         "nllb-600M": "JustFrederik/nllb-200-distilled-600M-ct2-int8",
         "nllb-1.3B": "JustFrederik/nllb-200-1.3B-ct2-int8",
-        "nllb-3.3B": "JustFrederik/nllb-200-3.3B-ct2-int8",
+        "nllb-3.3B": "OpenNMT/nllb-200-3.3B-ct2-int8",
     }
 
     NLLB_LANG_CODES = {
@@ -130,6 +130,8 @@ class LocalNLLBTranslator:
                 [source_tokens],
                 target_prefix=[[tgt_nllb]],
                 beam_size=5,
+                repetition_penalty=1.2,
+                no_repeat_ngram_size=3,
             )
             target_tokens = results[0].hypotheses[0][1:]
             translated = self.tokenizer.decode(self.tokenizer.convert_tokens_to_ids(target_tokens)).strip()
@@ -246,6 +248,14 @@ class TextTranslator:
         if not stripped_text:
             return ""
 
+        speaker_prefix = ""
+        spk_match = re.match(r"^(\[話者\d+\])\s*(.*)$", stripped_text)
+        if spk_match:
+            speaker_prefix = spk_match.group(1) + " "
+            stripped_text = spk_match.group(2).strip()
+            if not stripped_text:
+                return speaker_prefix.strip()
+
         effective_source_lang = source_lang or self.source_lang
 
         # ローカルAI翻訳モード
@@ -253,14 +263,16 @@ class TextTranslator:
             try:
                 if self.local_translator is None:
                     self.local_translator = LocalNLLBTranslator(model_name=self.nllb_model)
-                return self.local_translator.translate(
+                res = self.local_translator.translate(
                     stripped_text,
                     source_lang=effective_source_lang,
                     target_lang=target_lang,
                 )
+                return f"{speaker_prefix}{res}"
             except Exception as e_local:
                 print(f"[TextTranslator] ローカル翻訳失敗のためクラウドへフォールバックします: {e_local}")
                 # クラウド翻訳へフォールバック
 
         # クラウド翻訳モード
-        return self._translate_cloud(stripped_text, target_lang=target_lang, source_lang=effective_source_lang)
+        cloud_res = self._translate_cloud(stripped_text, target_lang=target_lang, source_lang=effective_source_lang)
+        return f"{speaker_prefix}{cloud_res}"

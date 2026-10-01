@@ -1,6 +1,8 @@
 import queue
+import re
 import threading
 import tkinter as tk
+from typing import Optional
 import customtkinter as ctk
 import sounddevice as sd
 from src.config import ConfigManager
@@ -78,6 +80,14 @@ class AppUI(ctk.CTk):
 
         # 録音中フラグ
         self.is_recording = False
+
+        # 翻訳用小バッファリング管理 (2〜3行 / 約70文字 / 2.0秒休止フラッシュ)
+        self._translation_buffer: list[str] = []
+        self._buffer_lock = threading.Lock()
+        self._buffer_timer: Optional[threading.Timer] = None
+        self._buffer_flush_delay = 2.0
+        self._buffer_max_lines = 3
+        self._buffer_max_chars = 70
 
         # グリッドのウェイト設定（中央のテキストエリアが伸縮）
         self.grid_rowconfigure(1, weight=1)
@@ -221,9 +231,9 @@ class AppUI(ctk.CTk):
         engine_label.grid(row=2, column=0, padx=10, pady=(6, 12), sticky="w")
 
         engines = [
-            "クラウド翻訳 (Google/MyMemory)",
-            "ローカル翻訳 (NLLB 600M)",
-            "ローカル翻訳 (NLLB 1.3B)",
+            "クラウド翻訳 (Google/MyMemory) (推奨)",
+            "ローカル翻訳 (NLLB 600M) (推奨)",
+            "ローカル翻訳 (NLLB 1.3B) (推奨)",
             "ローカル翻訳 (NLLB 3.3B)",
         ]
         self.engine_option = ctk.CTkOptionMenu(
@@ -237,8 +247,14 @@ class AppUI(ctk.CTk):
         saved_engine = self.config.get("translation_engine")
         if saved_engine in engines:
             self.engine_option.set(saved_engine)
+        elif saved_engine and "600M" in saved_engine:
+            self.engine_option.set("ローカル翻訳 (NLLB 600M) (推奨)")
+        elif saved_engine and "1.3B" in saved_engine:
+            self.engine_option.set("ローカル翻訳 (NLLB 1.3B) (推奨)")
+        elif saved_engine and "3.3B" in saved_engine:
+            self.engine_option.set("ローカル翻訳 (NLLB 3.3B)")
         else:
-            self.engine_option.set("クラウド翻訳 (Google/MyMemory)")
+            self.engine_option.set("クラウド翻訳 (Google/MyMemory) (推奨)")
 
         # 6. 音源分離チェックボックス (2行目の後半に配置)
         self.sep_checkbox = ctk.CTkCheckBox(
@@ -391,17 +407,110 @@ class AppUI(ctk.CTk):
             return None
 
     def _on_transcription_received(self, text: str):
-        """バックグラウンドスレッドからの文字起こし結果を受け取りキューへ追加＆翻訳実行"""
+        """バックグラウンドスレッドからの文字起こし結果を受け取りキューへ追加＆小バッファリング翻訳実行"""
+        # 左側の文字起こしテキストボックスへは即座に反映
         self.transcription_queue.put(text)
 
-        # バックグラウンドスレッドで翻訳処理を実行
+        stripped = text.strip()
+        if not stripped:
+            return
+
+        with self._buffer_lock:
+            # 話者タグ（[話者1]等）の確認
+            spk_match = re.match(r"^(\[話者\d+\])", stripped)
+            current_speaker = spk_match.group(1) if spk_match else None
+
+            last_speaker = None
+            if self._translation_buffer:
+                last_spk_match = re.match(r"^(\[話者\d+\])", self._translation_buffer[0])
+                last_speaker = last_spk_match.group(1) if last_spk_match else None
+
+            # 話者が交代した場合は混在を防ぐため直前のバッファをフラッシュ
+            if current_speaker != last_speaker and self._translation_buffer:
+                self._flush_translation_buffer_locked()
+
+            # バッファに追加
+            self._translation_buffer.append(stripped)
+
+            # バッファ内の合計文字数
+            total_chars = sum(len(line) for line in self._translation_buffer)
+
+            # 2〜3行（または文字数閾値）に達した場合は即座にフラッシュ
+            if len(self._translation_buffer) >= self._buffer_max_lines or total_chars >= self._buffer_max_chars:
+                self._flush_translation_buffer_locked()
+            else:
+                # 達していない場合は発話休止タイマー（2.0秒）を再設定
+                if self._buffer_timer is not None:
+                    self._buffer_timer.cancel()
+                self._buffer_timer = threading.Timer(
+                    self._buffer_flush_delay,
+                    self._on_buffer_timeout,
+                )
+                self._buffer_timer.daemon = True
+                self._buffer_timer.start()
+
+    def _on_buffer_timeout(self):
+        """発話休止タイマー満了時の自動フラッシュ"""
+        with self._buffer_lock:
+            self._flush_translation_buffer_locked()
+
+    def _flush_translation_buffer_locked(self):
+        """ロック保持下でのバッファフラッシュと翻訳スレッド起動"""
+        if self._buffer_timer is not None:
+            self._buffer_timer.cancel()
+            self._buffer_timer = None
+
+        if not self._translation_buffer:
+            return
+
+        buffered_lines = list(self._translation_buffer)
+        self._translation_buffer.clear()
+
         source_lang = parse_source_language_code(self.input_lang_option.get())
         target_lang = parse_target_language_code(self.target_lang_option.get())
         threading.Thread(
-            target=self._run_translation_thread,
-            args=(text, target_lang, source_lang),
+            target=self._run_buffered_translation_thread,
+            args=(buffered_lines, target_lang, source_lang),
             daemon=True,
         ).start()
+
+    def _run_buffered_translation_thread(self, lines: list[str], target_lang: str, source_lang: str = "auto"):
+        """バッファされた複数行を自然に結合して翻訳を実行"""
+        if not lines:
+            return
+
+        first_speaker = ""
+        m = re.match(r"^(\[話者\d+\])\s*(.*)$", lines[0])
+        if m:
+            first_speaker = m.group(1)
+
+        cleaned_parts = []
+        for line in lines:
+            sm = re.match(r"^(\[話者\d+\])\s*(.*)$", line)
+            content = sm.group(2) if sm else line
+            content = content.strip()
+            if content:
+                cleaned_parts.append(content)
+
+        if not cleaned_parts:
+            return
+
+        # CJK（日本語・中国語）の場合は読点や句点等を考慮して結合
+        first_content = cleaned_parts[0]
+        is_cjk = bool(re.search(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]", first_content))
+        if is_cjk:
+            combined_text = ""
+            for i, part in enumerate(cleaned_parts):
+                if i > 0 and combined_text and combined_text[-1] not in "。！？!?.,、， ":
+                    combined_text += "。"
+                combined_text += part
+        else:
+            combined_text = " ".join(cleaned_parts)
+
+        if first_speaker:
+            combined_text = f"{first_speaker} {combined_text}"
+
+        self._run_translation_thread(combined_text, target_lang, source_lang)
 
     def _run_translation_thread(self, text: str, target_lang: str, source_lang: str = "auto"):
         """別スレッドで翻訳を実行し、翻訳キューへ追加"""
@@ -435,6 +544,10 @@ class AppUI(ctk.CTk):
             self.recorder.stop()
             self.is_recording = False
 
+            # 停止時にバッファに残っているテキストを直ちにフラッシュ
+            with self._buffer_lock:
+                self._flush_translation_buffer_locked()
+
             self.record_button.configure(text="録音開始", fg_color="#28a745", hover_color="#218838")
             self.status_label.configure(text="ステータス: 停止中", text_color="gray")
             # 設定変更を再度有効化
@@ -459,6 +572,11 @@ class AppUI(ctk.CTk):
         """ウィンドウ終了時の処理"""
         try:
             self._save_current_settings()
+            with self._buffer_lock:
+                if self._buffer_timer is not None:
+                    self._buffer_timer.cancel()
+                    self._buffer_timer = None
+                self._translation_buffer.clear()
             if self.processor:
                 self.processor.stop()
             self.recorder.stop()
@@ -495,10 +613,11 @@ class AppUI(ctk.CTk):
                             ),
                         )
                     except Exception as e:
+                        err_msg = str(e)
                         self.after(
                             0,
-                            lambda: self.status_label.configure(
-                                text=f"ローカル翻訳読込失敗: {e}",
+                            lambda msg=err_msg: self.status_label.configure(
+                                text=f"ローカル翻訳読込失敗: {msg}",
                                 text_color="#dc3545",
                             ),
                         )
@@ -530,7 +649,8 @@ class AppUI(ctk.CTk):
                     self.separator.load_model()
                     self.after(0, lambda: self.status_label.configure(text="音源分離モデル準備完了", text_color="#28a745"))
                 except Exception as e:
-                    self.after(0, lambda: self.status_label.configure(text=f"音源分離読込失敗: {e}", text_color="#dc3545"))
+                    err_msg = str(e)
+                    self.after(0, lambda msg=err_msg: self.status_label.configure(text=f"音源分離読込失敗: {msg}", text_color="#dc3545"))
             threading.Thread(target=load_thread, daemon=True).start()
 
         self._save_current_settings()
@@ -574,8 +694,9 @@ class AppUI(ctk.CTk):
             self.after(0, update_ui_on_success)
 
         except Exception as e:
-            def update_ui_on_error():
-                self.status_label.configure(text=f"エラー: 開始失敗 ({e})", text_color="#dc3545")
+            err_msg = str(e)
+            def update_ui_on_error(msg=err_msg):
+                self.status_label.configure(text=f"エラー: 開始失敗 ({msg})", text_color="#dc3545")
                 self.record_button.configure(state="normal")
 
             self.after(0, update_ui_on_error)
@@ -604,6 +725,11 @@ class AppUI(ctk.CTk):
 
     def _clear_all_text(self):
         """全テキストエリアの内容を消去"""
+        with self._buffer_lock:
+            if self._buffer_timer is not None:
+                self._buffer_timer.cancel()
+                self._buffer_timer = None
+            self._translation_buffer.clear()
         self.transcribe_textbox.delete("1.0", tk.END)
         self.translate_textbox.delete("1.0", tk.END)
 
