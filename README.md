@@ -61,35 +61,46 @@
 
 ## 🚀 クイックスタート
 
-### 1. リポジトリのクローン
+### 📦 方法1: リリース版をダウンロードしてすぐ使う（最もおすすめ・Python不要）
+
+Pythonのインストールや環境構築は不要です。Windows PCがあればすぐに使い始めることができます。
+
+1. **[GitHub Releases (最新リリース)](https://github.com/hosimitu/talk-to-translate/releases/latest)** を開きます。
+2. ページ下部の Assets から **`Talk-to-Translate-vX.X.X-windows-x64.zip`** をダウンロードします。
+3. ダウンロードした ZIP ファイルを右クリックして「すべて展開」で解凍します。
+4. 解凍されたフォルダ内の **`Talk-to-Translate.exe`** をダブルクリックするだけで、コマンド画面なしにアプリが起動します。
+   （※デスクトップ等にショートカットを作成しておくと便利です）
+
+---
+
+### 🛠️ 方法2: ソースコードから動かす場合（開発者向け）
+
+Python環境で直接スクリプトを実行したり、自身でコードをカスタマイズ・再ビルドしたい場合の手順です。
+
+#### 1. リポジトリのクローン
 ```bash
 git clone https://github.com/hosimitu/talk-to-translate.git
 cd talk-to-translate
 ```
 
-### 2. 仮想環境の作成とパッケージのインストール
+#### 2. 仮想環境の作成とパッケージのインストール
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### 3. アプリケーションの起動
-
-**方法 A: ビルド済みEXEから起動（最もおすすめ・黒い画面なし）**
-1. 初回のみ `python build_exe.py` を実行してEXEをビルドします。
-2. 生成された **`dist\Talk-to-Translate\Talk-to-Translate.exe`** をダブルクリックするだけで、コマンド画面なしにアプリ単体で高速起動します。
-   （デスクトップ等にショートカットを作成しておくと便利です）
-
-**方法 B: バッチファイルから起動**
-エクスプローラーで **[`run.bat`](file:///c:/github/talk-to-translate/run.bat)** をダブルクリックします。
-
-**方法 C: コマンドラインから起動**
-```powershell
-python main.py
-# または
-.\.venv\Scripts\python.exe main.py
-```
+#### 3. アプリケーションの起動
+- **通常起動**:
+  ```powershell
+  python main.py
+  # または run.bat をダブルクリック
+  ```
+- **EXEの独自ビルド**:
+  ```powershell
+  python build_exe.py
+  ```
+  実行すると `dist\Talk-to-Translate\` 配下にスタンドアロンEXEが生成されます。
 
 ---
 
