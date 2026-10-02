@@ -1,5 +1,5 @@
 """
-Talk-to-Translate EXE ビルドスクリプト (v1.3.0)
+Talk-to-Translate EXE ビルドスクリプト (v1.4.0)
 PyInstaller を使用して、NLLB-200ローカル翻訳、MossFormer2、SenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
 """
 
@@ -10,7 +10,7 @@ import sys
 
 def build():
     print("========================================")
-    print("Talk-to-Translate EXE ビルドを開始します (v1.3.0)")
+    print("Talk-to-Translate EXE ビルドを開始します (v1.4.0)")
     print("========================================")
 
     pyinstaller_cmd = [

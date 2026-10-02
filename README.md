@@ -112,6 +112,7 @@ pip install -r requirements.txt
    - **入力言語**: 通常は `自動検出 (auto)` のままでOKです。
    - **翻訳先言語**: 翻訳したい言語（英語、日本語、中国語）を選択します。
    - **翻訳エンジン**: `クラウド翻訳 (Google/MyMemory) (推奨)` または `ローカル翻訳 (NLLB 600M / 1.3B 推奨)` を選択します（デフォルトはクラウド）。
+   - **話者識別**: 複数人の会議や対面会話で発話者ごとに「[話者1]」「[話者2]」...と自動でラベル分けしたい場合にチェックを入れます（完全メモリ完結・CPU負荷極小）。
 2. **録音開始**:
    - 下部の緑色の **「録音開始」** ボタンをクリックします（ボタンが赤色の「録音停止」に変わります）。
    - 初回起動時のみ、選択したAIモデルが自動ダウンロードされます。
@@ -120,7 +121,7 @@ pip install -r requirements.txt
    - 同時に右側の **「🌐 翻訳結果」** に翻訳テキストが自動表示されます。
 4. **コピー・消去**:
    - 各テキストボックス右上の **「コピー」** ボタンをクリックすると、クリップボードにコピーされます。
-   - 下部の **「テキスト全消去」** ボタンで、表示中のテキストをクリアできます。
+   - 下部の **「テキスト全消去」** ボタンで、表示中のテキストをクリアできます（登録話者プロファイルも自動でリセットされます）。
 
 ---
 
@@ -142,11 +143,11 @@ pip install -r requirements.txt
 | 対象データ | 保存場所 (エクスプローラーのアドレスバーに入力) | 内容 |
 | :--- | :--- | :--- |
 | **設定ファイル** | `%APPDATA%\Talk-to-Translate` | UIの設定保存ファイル (`config.json`) ※存在する場合のみ |
-| **AIモデルキャッシュ** | `%USERPROFILE%\.cache\huggingface` | SenseVoice / Whisper等のダウンロード済み音声認識モデル |
+| **AIモデルキャッシュ** | `%USERPROFILE%\.cache\huggingface` | SenseVoice / Whisper / 3D-speaker等のダウンロード済みモデル |
 | **ローカル翻訳モデル** | アプリフォルダ内の `checkpoints\` | NLLB翻訳モデル（アプリフォルダ削除時に同時に削除されます） |
 
 > [!NOTE]
-> `%USERPROFILE%\.cache\huggingface` には他のPython AIツールでダウンロードしたモデルが同居している場合があります。Talk-to-Translateで使用したモデルのみを削除したい場合は、`hub` フォルダ内の `models--csukuangfj--sherpa-onnx-sense-voice...` や `models--Systran--faster-whisper...` を個別に削除してください。
+> `%USERPROFILE%\.cache\huggingface` には他のPython AIツールでダウンロードしたモデルが同居している場合があります。Talk-to-Translateで使用したモデルのみを削除したい場合は、`hub` フォルダ内の `models--csukuangfj--sherpa-onnx-sense-voice...`、`models--csukuangfj--speaker-embedding-models...`、`models--Systran--faster-whisper...` を個別に削除してください。
 
 ---
 
@@ -156,6 +157,8 @@ pip install -r requirements.txt
 $env:PYTHONPATH="."
 $env:PYTHONIOENCODING="utf-8"
 python tests/test_config.py
+python tests/test_diarizer.py
+python tests/test_processor.py
 python tests/test_transcriber.py
 python tests/test_translator.py
 ```
