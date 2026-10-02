@@ -1,0 +1,47 @@
+name: 🐛 バグレポート
+description: 問題の報告・修正依頼
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 事前チェック
+      options:
+        - label: 既存のIssueで同様の報告がないか確認しました
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 問題の内容
+      placeholder: 何が起きているのか、簡潔に記述してください
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 再現手順
+      placeholder: |
+        1. 〇〇を実行
+        2. △△をクリック
+        3. □□というエラーが出る
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: 期待される動作
+      placeholder: 本来どうなるべきだったかを記述してください
+  - type: textarea
+    id: environment
+    attributes:
+      label: 実行環境
+      placeholder: |
+        - OS: [例: Windows 11 / macOS]
+        - Version: [例: v1.0.0]
+        - その他: [例: 使用ブラウザ、特定の設定など]
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 補足・スクリーンショット
+      placeholder: エラーログや画像があればここに貼り付けてください

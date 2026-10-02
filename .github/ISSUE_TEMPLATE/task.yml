@@ -1,0 +1,24 @@
+name: 📋 調査・その他タスク
+description: 調査事項や、分類できない雑多なタスク
+title: "[TASK]: "
+labels: ["task"]
+body:
+  - type: textarea
+    id: objective
+    attributes:
+      label: タスクの目的
+      placeholder: 何を調査・達成したいのかを記述してください
+    validations:
+      required: true
+  - type: textarea
+    id: todo
+    attributes:
+      label: やることリスト
+      placeholder: |
+        - [ ] 〇〇について調べる
+        - [ ] △△を試してみる
+  - type: textarea
+    id: reference
+    attributes:
+      label: 参考資料
+      placeholder: 関連するURLや文献があれば貼ってください

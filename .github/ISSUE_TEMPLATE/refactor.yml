@@ -1,0 +1,24 @@
+name: ♻️ リファクタリング・整理
+description: コードの品質改善や整理
+title: "[REFACTOR]: "
+labels: ["refactor"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 現在の課題
+      placeholder: 「コードが重複している」「このクラスの責務が大きすぎる」など
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: どのように改善するか
+      placeholder: 具体的な修正方針や、理想的なコードの構成を記述してください
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: 影響範囲
+      options:
+        - label: 外部仕様（APIやUI）に変更はない
+        - label: 既存のテストがパスすることを確認する

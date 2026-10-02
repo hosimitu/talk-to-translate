@@ -1,0 +1,17 @@
+name: 📝 ドキュメント
+description: ドキュメントの作成・修正・翻訳
+title: "[DOCS]: "
+labels: ["documentation"]
+body:
+  - type: textarea
+    id: content
+    attributes:
+      label: 修正・追加の内容
+      placeholder: どのドキュメントを、どのように書き換えるかを記述してください
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: 修正の理由
+      placeholder: 「仕様が変わった」「説明が分かりにくかった」など
