@@ -47,3 +47,7 @@ talk-to-translate.code-workspace
 models/
 checkpoints/
 
+# Agent / AI Assistant
+.agents/
+
+
