@@ -169,10 +169,13 @@ class AudioProcessor:
                     # 2人以上の声が分離された場合
                     for i, track in enumerate(tracks):
                         norm_track = preprocess_audio(track)
-                        text = self.transcriber.transcribe(norm_track, language=self._language)
-                        if text and text.strip():
-                            speaker_label = f"[話者{i+1}]"
-                            self.on_transcription_callback(f"{speaker_label} {text.strip()}")
+                        try:
+                            text = self.transcriber.transcribe(norm_track, language=self._language)
+                            if text and text.strip():
+                                speaker_label = f"[話者{i+1}]"
+                                self.on_transcription_callback(f"{speaker_label} {text.strip()}")
+                        except Exception as e:
+                            print(f"[AudioProcessor Error] 分離音声(話者{i+1})の文字起こし失敗: {e}")
                     return
             except Exception as e:
                 print(f"[AudioProcessor] 音源分離スキップ（フォールバック）: {e}")
@@ -184,3 +187,5 @@ class AudioProcessor:
                 self.on_transcription_callback(text.strip())
         except Exception as e:
             print(f"[AudioProcessor Error] 文字起こし処理失敗: {e}")
+            import traceback
+            traceback.print_exc()

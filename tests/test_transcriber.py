@@ -1,6 +1,8 @@
-"""文字起こしエンジンのテストスクリプト"""
-
+import os
+import sys
 import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.transcriber import parse_language_code, parse_model_size, TranscriptionEngine
 
 
@@ -25,7 +27,17 @@ def test_sensevoice_engine():
     print(f"[OK] SenseVoiceエンジン推論テスト成功 (結果: '{res}')")
 
 
+def test_whisper_engine():
+    print("Whisperエンジンのテスト実行中 (small)...")
+    engine = TranscriptionEngine(model_size="small")
+    dummy_audio = np.zeros(16000, dtype=np.float32)
+    res = engine.transcribe(dummy_audio, language="ja")
+    assert isinstance(res, str)
+    print(f"[OK] Whisperエンジン推論テスト成功 (結果: '{res}')")
+
+
 if __name__ == "__main__":
     test_parsers()
     test_sensevoice_engine()
+    test_whisper_engine()
     print("すべての文字起こしエンジンテストが正常に通過しました！")

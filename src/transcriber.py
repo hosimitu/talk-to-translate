@@ -88,24 +88,22 @@ class TranscriptionEngine:
         if self.whisper_model is None:
             self._load_model()
 
-        initial_prompt = None
-        if language == "ja":
-            initial_prompt = "こんにちは。日本語の会話をリアルタイムで文字起こしします。よろしくお願いします。"
-        elif language == "zh":
-            initial_prompt = "你好，正在进行语音转文字。"
-
+        # AudioProcessor側で既に発話区間（VAD）が切り出されているため、
+        # Whisper側の二重VADフィルタ（vad_filter=True）は無効化（高速化・短文誤カット防止・アセット依存解消）
+        # チャンクごとの独立推論を行い、プロンプト・前文起因のハルシネーション（繰り返しループ）を防ぐため
+        # condition_on_previous_text=False を指定
         segments, _ = self.whisper_model.transcribe(
             audio_data,
             language=language,
-            initial_prompt=initial_prompt,
-            vad_filter=True,
-            vad_parameters=dict(
-                min_silence_duration_ms=400,
-                threshold=0.3,
-            ),
+            condition_on_previous_text=False,
+            vad_filter=False,
             beam_size=3,
             temperature=0.0,
         )
 
-        texts = [segment.text.strip() for segment in segments if segment.text.strip()]
+        texts = [
+            segment.text.strip()
+            for segment in segments
+            if segment.text.strip() and segment.no_speech_prob < 0.6
+        ]
         return " ".join(texts)

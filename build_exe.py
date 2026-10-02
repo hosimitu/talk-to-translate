@@ -26,6 +26,7 @@ def build():
         "--collect-data", "sherpa_onnx",
         "--collect-data", "clearvoice",
         "--collect-data", "transformers",
+        "--collect-data", "faster_whisper",
         # C++ / ONNX / Torch 関連DLLの同梱
         "--collect-binaries", "sherpa_onnx",
         "--collect-binaries", "sherpa_onnx_core",
