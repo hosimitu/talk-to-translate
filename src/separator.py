@@ -7,7 +7,6 @@ import os
 import tempfile
 from typing import Optional
 import numpy as np
-import soundfile as sf
 
 
 class SpeechSeparator:
@@ -36,9 +35,19 @@ class SpeechSeparator:
         :return: 分離された音声トラックのリスト [track_1, track_2]
         """
         if not self._is_loaded:
-            self.load_model()
+            try:
+                self.load_model()
+            except Exception as e:
+                print(f"[SpeechSeparator Error] モデルロード失敗のため元音声を返します: {e}")
+                return [audio_data]
 
         if self._cv is None or len(audio_data) == 0:
+            return [audio_data]
+
+        try:
+            import soundfile as sf
+        except ImportError as e:
+            print(f"[SpeechSeparator Error] soundfile がインポートできないため音源分離をスキップします: {e}")
             return [audio_data]
 
         temp_in = None

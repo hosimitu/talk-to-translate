@@ -18,7 +18,7 @@ def test_default_config():
 
         assert loaded == DEFAULT_CONFIG
         assert loaded["transcription_model"] == "SenseVoice-Small (超高速・日中英推奨)"
-        assert loaded["translation_engine"] == "クラウド翻訳 (Google/MyMemory)"
+        assert loaded["translation_engine"] == "クラウド翻訳 (Google/MyMemory) (推奨)"
         print("[OK] デフォルト設定の読み込みテスト成功")
 
 
