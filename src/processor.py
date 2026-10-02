@@ -1,6 +1,6 @@
 """
 Talk-to-Translate 音声処理ワーカーモジュール
-発話と無音を検出し、必要に応じてMossFormerによる音源分離（2人同時発話の個別抽出）を行い、文字起こしを実行します。
+発話と無音を検出し、必要に応じて話者識別（3D-speaker ONNX）を行い、文字起こしを実行します。
 """
 
 import threading
@@ -10,6 +10,7 @@ import numpy as np
 
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine
+from src.diarizer import SpeakerDiarizer
 from src.separator import SpeechSeparator
 
 
@@ -35,13 +36,14 @@ def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: floa
 
 
 class AudioProcessor:
-    """発話区間と無音を検出し、文単位で文字起こし（+音源分離）を行うワーカー"""
+    """発話区間と無音を検出し、文単位で文字起こし（+話者識別）を行うワーカー"""
 
     def __init__(
         self,
         recorder: AudioRecorder,
         transcriber: TranscriptionEngine,
         on_transcription_callback: Callable[[str], None],
+        diarizer: Optional[SpeakerDiarizer] = None,
         separator: Optional[SpeechSeparator] = None,
         silence_threshold: float = 0.03,
         silence_duration_sec: float = 0.8,
@@ -53,13 +55,15 @@ class AudioProcessor:
         :param recorder: AudioRecorder インスタンス
         :param transcriber: TranscriptionEngine インスタンス
         :param on_transcription_callback: 文字起こし完了時に呼ばれるコールバック
-        :param separator: SpeechSeparator インスタンス (任意)
+        :param diarizer: SpeakerDiarizer インスタンス (推奨・多話者識別)
+        :param separator: SpeechSeparator インスタンス (互換用)
         """
         self.recorder = recorder
         self.transcriber = transcriber
         self.on_transcription_callback = on_transcription_callback
+        self.diarizer = diarizer
         self.separator = separator
-        self.enable_separation = False  # 音源分離のON/OFFフラグ
+        self.enable_diarization = False  # 話者識別のON/OFFフラグ
 
         self.silence_threshold = silence_threshold
         self.silence_duration_sec = silence_duration_sec
@@ -69,6 +73,15 @@ class AudioProcessor:
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
         self._language: Optional[str] = None
+
+    @property
+    def enable_separation(self) -> bool:
+        """後方互換プロパティ"""
+        return self.enable_diarization
+
+    @enable_separation.setter
+    def enable_separation(self, value: bool):
+        self.enable_diarization = value
 
     @property
     def is_running(self) -> bool:
@@ -148,7 +161,7 @@ class AudioProcessor:
             self._process_speech(speech_buffer, sample_rate)
 
     def _process_speech(self, buffer: list[np.ndarray], sample_rate: int):
-        """蓄積された発話音声を処理（音源分離ONなら分離、OFFなら直接文字起こし）"""
+        """蓄積された発話音声を処理（話者識別ONなら[話者N]タグを付与、OFFなら直接文字起こし）"""
         if not buffer:
             return
 
@@ -161,12 +174,20 @@ class AudioProcessor:
         # 1. 音量自動ノーマライズ
         audio_data = preprocess_audio(raw_audio, target_peak=0.9, max_gain=6.0)
 
-        # 2. 音源分離が有効な場合
-        if self.enable_separation and self.separator is not None:
+        # 2. 話者識別（ダイアライザーが有効な場合）
+        speaker_tag = ""
+        if self.enable_diarization and self.diarizer is not None:
+            try:
+                spk = self.diarizer.identify_speaker(audio_data, sample_rate)
+                if spk:
+                    speaker_tag = f"[{spk}] "
+            except Exception as e:
+                print(f"[AudioProcessor] 話者識別スキップ（フォールバック）: {e}")
+        elif self.enable_separation and self.separator is not None:
+            # 旧音源分離（Separatorが明示的に指定された場合のフォールバック）
             try:
                 tracks = self.separator.separate(audio_data, sample_rate)
                 if len(tracks) > 1:
-                    # 2人以上の声が分離された場合
                     for i, track in enumerate(tracks):
                         norm_track = preprocess_audio(track)
                         try:
@@ -180,11 +201,12 @@ class AudioProcessor:
             except Exception as e:
                 print(f"[AudioProcessor] 音源分離スキップ（フォールバック）: {e}")
 
-        # 3. 通常の単一文字起こし（音源分離OFFまたは1人の場合）
+        # 3. 通常の文字起こし（話者タグ付き または タグなし）
         try:
             text = self.transcriber.transcribe(audio_data, language=self._language)
             if text and text.strip():
-                self.on_transcription_callback(text.strip())
+                final_text = f"{speaker_tag}{text.strip()}"
+                self.on_transcription_callback(final_text)
         except Exception as e:
             print(f"[AudioProcessor Error] 文字起こし処理失敗: {e}")
             import traceback

@@ -9,6 +9,7 @@ from src.config import ConfigManager
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
 from src.processor import AudioProcessor
+from src.diarizer import SpeakerDiarizer
 from src.translator import (
     TextTranslator,
     parse_target_language_code,
@@ -56,7 +57,8 @@ class AppUI(ctk.CTk):
         self.transcriber: TranscriptionEngine | None = None
         self.processor: AudioProcessor | None = None
 
-        # 音源分離エンジン
+        # 話者識別エンジン & 音源分離エンジン
+        self.diarizer = SpeakerDiarizer()
         self.separator = SpeechSeparator()
 
         # 翻訳エンジンの初期化（保存された設定を反映）
@@ -256,10 +258,10 @@ class AppUI(ctk.CTk):
         else:
             self.engine_option.set("クラウド翻訳 (Google/MyMemory) (推奨)")
 
-        # 6. 音源分離チェックボックス (2行目の後半に配置)
+        # 6. 話者識別（旧・音源分離）チェックボックス (2行目の後半に配置)
         self.sep_checkbox = ctk.CTkCheckBox(
             header_frame,
-            text="👥 音源分離（複数人の同時発話を分離）",
+            text="👥 話者識別（3D-speaker ONNX / 多人数対応）",
             font=ctk.CTkFont(size=12),
             command=self._on_toggle_separation,
         )
@@ -548,6 +550,9 @@ class AppUI(ctk.CTk):
             with self._buffer_lock:
                 self._flush_translation_buffer_locked()
 
+            # 話者登録をリセット（次回セッションを話者1から開始）
+            self.diarizer.reset()
+
             self.record_button.configure(text="録音開始", fg_color="#28a745", hover_color="#218838")
             self.status_label.configure(text="ステータス: 停止中", text_color="gray")
             # 設定変更を再度有効化
@@ -637,20 +642,20 @@ class AppUI(ctk.CTk):
         self._save_current_settings()
 
     def _on_toggle_separation(self):
-        """音源分離チェックボックスの切替ハンドラ"""
+        """話者識別（旧・音源分離）チェックボックスの切替ハンドラ"""
         is_enabled = (self.sep_checkbox.get() == 1)
         if self.processor:
-            self.processor.enable_separation = is_enabled
+            self.processor.enable_diarization = is_enabled
 
-        if is_enabled and not self.separator._is_loaded:
-            self.status_label.configure(text="MossFormer音源分離モデルを読み込み中...", text_color="#ffc107")
+        if is_enabled and not self.diarizer.is_loaded:
+            self.status_label.configure(text="3D-speaker話者識別モデルを読み込み中...", text_color="#ffc107")
             def load_thread():
                 try:
-                    self.separator.load_model()
-                    self.after(0, lambda: self.status_label.configure(text="音源分離モデル準備完了", text_color="#28a745"))
+                    self.diarizer.load_model()
+                    self.after(0, lambda: self.status_label.configure(text="話者識別モデル準備完了", text_color="#28a745"))
                 except Exception as e:
                     err_msg = str(e)
-                    self.after(0, lambda msg=err_msg: self.status_label.configure(text=f"音源分離読込失敗: {msg}", text_color="#dc3545"))
+                    self.after(0, lambda msg=err_msg: self.status_label.configure(text=f"話者識別読込失敗: {msg}", text_color="#dc3545"))
             threading.Thread(target=load_thread, daemon=True).start()
 
         self._save_current_settings()
@@ -664,16 +669,17 @@ class AppUI(ctk.CTk):
             else:
                 self.transcriber.change_model(model_size=model_name)
 
-            # 音声プロセッサの初期化 (文単位のVAD処理 + 音源分離)
+            # 音声プロセッサの初期化 (文単位のVAD処理 + 話者識別)
             self.processor = AudioProcessor(
                 recorder=self.recorder,
                 transcriber=self.transcriber,
                 on_transcription_callback=self._on_transcription_received,
+                diarizer=self.diarizer,
                 separator=self.separator,
                 silence_threshold=0.03,
                 silence_duration_sec=0.8,
             )
-            self.processor.enable_separation = (self.sep_checkbox.get() == 1)
+            self.processor.enable_diarization = (self.sep_checkbox.get() == 1)
 
             # マイク録音開始
             self.recorder.start(device_index=device_index)
@@ -732,6 +738,7 @@ class AppUI(ctk.CTk):
             self._translation_buffer.clear()
         self.transcribe_textbox.delete("1.0", tk.END)
         self.translate_textbox.delete("1.0", tk.END)
+        self.diarizer.reset()
 
     def append_transcription(self, text: str):
         """文字起こしテキストを末尾に追加し、自動スクロールする"""
