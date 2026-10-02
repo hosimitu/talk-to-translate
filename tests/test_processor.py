@@ -28,6 +28,41 @@ def test_preprocess_audio():
     print("[OK] 無音信号の安全処理確認")
 
 
+def test_audio_processor_diarization():
+    print("AudioProcessor と SpeakerDiarizer 連携テスト実行中...")
+    from unittest.mock import MagicMock
+    from src.processor import AudioProcessor
+    from src.audio import AudioRecorder
+    from src.diarizer import SpeakerDiarizer
+
+    recorder = AudioRecorder(sample_rate=16000)
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "こんにちは、テストです。"
+
+    results = []
+    def callback(text: str):
+        results.append(text)
+
+    diarizer = SpeakerDiarizer(threshold=0.55)
+    diarizer.identify_speaker = MagicMock(return_value="話者1")
+
+    processor = AudioProcessor(
+        recorder=recorder,
+        transcriber=mock_transcriber,
+        on_transcription_callback=callback,
+        diarizer=diarizer,
+    )
+    processor.enable_diarization = True
+
+    dummy_speech = [np.ones(16000, dtype=np.float32) * 0.1]
+    processor._process_speech(dummy_speech, sample_rate=16000)
+
+    assert len(results) == 1
+    assert results[0] == "[話者1] こんにちは、テストです。"
+    print(f"[OK] 話者タグ付与連携テスト成功: {results[0]}")
+
+
 if __name__ == "__main__":
     test_preprocess_audio()
-    print("すべての音声前処理テストが正常に通過しました！")
+    test_audio_processor_diarization()
+    print("すべての音声前処理・プロセッサテストが正常に通過しました！")
