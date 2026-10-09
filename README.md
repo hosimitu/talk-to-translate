@@ -142,7 +142,7 @@ pip install -r requirements.txt
 
 | 対象データ | 保存場所 (エクスプローラーのアドレスバーに入力) | 内容 |
 | :--- | :--- | :--- |
-| **設定ファイル** | `%APPDATA%\Talk-to-Translate` | UIの設定保存ファイル (`config.json`) ※存在する場合のみ |
+| **設定ファイル・ログ** | `%APPDATA%\Talk-to-Translate` | 設定ファイル (`config.json`)、実行時ログ (`talk-to-translate.log`) ※存在する場合のみ |
 | **AIモデルキャッシュ** | `%USERPROFILE%\.cache\huggingface` | SenseVoice / Whisper / 3D-speaker等のダウンロード済みモデル |
 | **ローカル翻訳モデル** | アプリフォルダ内の `checkpoints\` | NLLB翻訳モデル（アプリフォルダ削除時に同時に削除されます） |
 
@@ -156,11 +156,13 @@ pip install -r requirements.txt
 ```powershell
 $env:PYTHONPATH="."
 $env:PYTHONIOENCODING="utf-8"
+python tests/test_stream_protection.py
 python tests/test_config.py
 python tests/test_diarizer.py
 python tests/test_processor.py
 python tests/test_transcriber.py
 python tests/test_translator.py
+python tests/test_ui_config_integration.py
 ```
 
 ---

@@ -1,6 +1,7 @@
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 from typing import Optional
 import customtkinter as ctk
@@ -82,6 +83,7 @@ class AppUI(ctk.CTk):
 
         # 録音中フラグ
         self.is_recording = False
+        self._last_activity_update = 0.0
 
         # 翻訳用小バッファリング管理 (2〜3行 / 約70文字 / 2.0秒休止フラッシュ)
         self._translation_buffer: list[str] = []
@@ -159,9 +161,13 @@ class AppUI(ctk.CTk):
         )
         self.mic_option.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
 
-        # 保存されていたマイクデバイスの復元
+        # 保存されていたマイクデバイスの復元 (デバイス番号のズレを吸収して名前で照合)
         saved_mic = self.config.get("mic_device", "")
-        matched_mic = next((m for m in mics if saved_mic and saved_mic in m), None)
+        saved_name = saved_mic.split(":", 1)[1].strip() if ":" in saved_mic else saved_mic.strip()
+        matched_mic = None
+        if saved_name:
+            matched_mic = next((m for m in mics if saved_name.lower() in m.lower()), None)
+
         if matched_mic:
             self.mic_option.set(matched_mic)
         elif mics:
@@ -676,8 +682,10 @@ class AppUI(ctk.CTk):
                 on_transcription_callback=self._on_transcription_received,
                 diarizer=self.diarizer,
                 separator=self.separator,
-                silence_threshold=0.03,
+                silence_threshold=0.006,
                 silence_duration_sec=0.8,
+                min_speech_duration_sec=0.3,
+                on_activity_callback=self._on_audio_activity,
             )
             self.processor.enable_diarization = (self.sep_checkbox.get() == 1)
 
@@ -691,7 +699,7 @@ class AppUI(ctk.CTk):
             # UIの更新をメインスレッドへディスパッチ
             def update_ui_on_success():
                 self.record_button.configure(text="録音停止", fg_color="#dc3545", hover_color="#c82333", state="normal")
-                self.status_label.configure(text="ステータス: 録音中...", text_color="#28a745")
+                self.status_label.configure(text="ステータス: 録音中 (音声待機中...)", text_color="#17a2b8")
                 self.mic_option.configure(state="disabled")
                 self.model_option.configure(state="disabled")
                 self.input_lang_option.configure(state="disabled")
@@ -706,6 +714,29 @@ class AppUI(ctk.CTk):
                 self.record_button.configure(state="normal")
 
             self.after(0, update_ui_on_error)
+
+    def _on_audio_activity(self, rms: float, is_active: bool):
+        """マイク音声の入力レベルおよび発話検知状態のUI反映"""
+        if not self.is_recording:
+            return
+
+        now = time.time()
+        # UI更新頻度を制限 (250msごと)
+        if now - self._last_activity_update < 0.25:
+            return
+        self._last_activity_update = now
+
+        def update():
+            if not self.is_recording:
+                return
+            if is_active:
+                self.status_label.configure(text="ステータス: 録音中 (🎤 音声検知中...)", text_color="#28a745")
+            elif rms < 0.0002:
+                self.status_label.configure(text="ステータス: 録音中 (⚠️ 入力なし: マイク設定を確認してください)", text_color="#ffc107")
+            else:
+                self.status_label.configure(text="ステータス: 録音中 (音声待機中...)", text_color="#17a2b8")
+
+        self.after(0, update)
 
     def _copy_transcription(self):
         """文字起こしテキストのクリップボードコピー"""

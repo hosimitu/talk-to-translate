@@ -62,7 +62,44 @@ def test_audio_processor_diarization():
     print(f"[OK] 話者タグ付与連携テスト成功: {results[0]}")
 
 
+def test_audio_processor_vad_and_short_speech():
+    print("AudioProcessor VAD閾値適正化および短文処理テスト実行中...")
+    from unittest.mock import MagicMock
+    from src.processor import AudioProcessor
+    from src.audio import AudioRecorder
+
+    recorder = AudioRecorder(sample_rate=16000)
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "はい"
+
+    results = []
+    def callback(text: str):
+        results.append(text)
+
+    activity_log = []
+    def on_activity(rms: float, is_active: bool):
+        activity_log.append((rms, is_active))
+
+    processor = AudioProcessor(
+        recorder=recorder,
+        transcriber=mock_transcriber,
+        on_transcription_callback=callback,
+        silence_threshold=0.006,
+        min_speech_duration_sec=0.3,
+        on_activity_callback=on_activity,
+    )
+
+    # 0.4秒分の音声（旧仕様1.0sでは切り捨てられていた短い相槌）
+    short_speech = [np.ones(int(16000 * 0.4), dtype=np.float32) * 0.008]
+    processor._process_speech(short_speech, sample_rate=16000)
+
+    assert len(results) == 1
+    assert results[0] == "はい"
+    print(f"[OK] 短文発話(0.4秒)の正常処理確認: '{results[0]}'")
+
+
 if __name__ == "__main__":
     test_preprocess_audio()
     test_audio_processor_diarization()
+    test_audio_processor_vad_and_short_speech()
     print("すべての音声前処理・プロセッサテストが正常に通過しました！")

@@ -45,10 +45,11 @@ class AudioProcessor:
         on_transcription_callback: Callable[[str], None],
         diarizer: Optional[SpeakerDiarizer] = None,
         separator: Optional[SpeechSeparator] = None,
-        silence_threshold: float = 0.03,
+        silence_threshold: float = 0.006,
         silence_duration_sec: float = 0.8,
-        min_speech_duration_sec: float = 1.0,
+        min_speech_duration_sec: float = 0.3,
         max_speech_duration_sec: float = 8.0,
+        on_activity_callback: Optional[Callable[[float, bool], None]] = None,
     ):
         """
         初期化
@@ -57,6 +58,11 @@ class AudioProcessor:
         :param on_transcription_callback: 文字起こし完了時に呼ばれるコールバック
         :param diarizer: SpeakerDiarizer インスタンス (推奨・多話者識別)
         :param separator: SpeechSeparator インスタンス (互換用)
+        :param silence_threshold: 有音判定の基準RMS値 (デフォルト0.006)
+        :param silence_duration_sec: 発話終了とみなす無音継続時間 (秒)
+        :param min_speech_duration_sec: 処理対象とする最小発話時間 (秒、短文相槌に対応)
+        :param max_speech_duration_sec: 1回の処理に含める最大発話時間 (秒)
+        :param on_activity_callback: 音声レベルおよび発話状態更新コールバック (rms: float, is_active: bool)
         """
         self.recorder = recorder
         self.transcriber = transcriber
@@ -64,11 +70,13 @@ class AudioProcessor:
         self.diarizer = diarizer
         self.separator = separator
         self.enable_diarization = False  # 話者識別のON/OFFフラグ
+        self.on_activity_callback = on_activity_callback
 
         self.silence_threshold = silence_threshold
         self.silence_duration_sec = silence_duration_sec
         self.min_speech_duration_sec = min_speech_duration_sec
         self.max_speech_duration_sec = max_speech_duration_sec
+        self.noise_floor = 0.002  # バックグラウンド環境音の初期推定値
 
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
@@ -122,7 +130,21 @@ class AudioProcessor:
                 continue
 
             rms = float(np.sqrt(np.mean(chunk**2)))
-            is_sound = rms > self.silence_threshold
+
+            # 動的ノイズフロアの追従更新（非発話時の緩やかな指数移動平均）
+            if not is_speaking and rms < self.silence_threshold * 2.0:
+                self.noise_floor = 0.95 * self.noise_floor + 0.05 * rms
+
+            # 実環境適応の有効閾値 (低感度マイクと高ノイズ環境の両方に対応)
+            effective_threshold = max(0.003, min(self.silence_threshold, self.noise_floor * 2.5))
+            is_sound = rms > effective_threshold
+
+            # UI側の音量メーターや発話状態表示へ通知
+            if self.on_activity_callback:
+                try:
+                    self.on_activity_callback(rms, is_speaking or is_sound)
+                except Exception:
+                    pass
 
             now = time.time()
 
