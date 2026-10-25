@@ -7,6 +7,7 @@ Talk-to-Translate 翻訳モジュール
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Callable, Optional
 from deep_translator import GoogleTranslator, MyMemoryTranslator
 from src.config import TRANSLATION_ENGINES
@@ -42,6 +43,20 @@ def parse_target_language_code(ui_language_text: str) -> str:
     elif "zh" in ui_language_text:
         return "zh-CN"
     return "en"
+
+
+def canonical_language_code(lang: str) -> str:
+    """言語コードの表記ゆれ（zh / zh-CN など）を比較用に統一する"""
+    if not lang:
+        return ""
+    lowered = lang.strip().lower()
+    if lowered in ("zh", "zh-cn", "zh-hans", "cmn"):
+        return "zh"
+    if lowered in ("ja", "jp", "jpn"):
+        return "ja"
+    if lowered in ("en", "eng"):
+        return "en"
+    return lowered
 
 
 def parse_source_language_code(ui_language_text: str) -> str:
@@ -192,15 +207,39 @@ class TextTranslator:
         # ローカル翻訳エンジン（初期化は遅延）
         self.local_translator: Optional[LocalNLLBTranslator] = None
 
+        # 同一テキストの再翻訳を避ける LRU キャッシュ
+        self._cache_max_entries = 128
+        self._cache: "OrderedDict[tuple, str]" = OrderedDict()
+
+    def _clear_cache(self):
+        """エンジン・モデル変更時にキャッシュを破棄する"""
+        self._cache.clear()
+
+    def _cache_get(self, key: tuple) -> Optional[str]:
+        cached = self._cache.get(key)
+        if cached is None:
+            return None
+        self._cache.move_to_end(key)
+        return cached
+
+    def _cache_put(self, key: tuple, value: str):
+        self._cache[key] = value
+        self._cache.move_to_end(key)
+        while len(self._cache) > self._cache_max_entries:
+            self._cache.popitem(last=False)
+
     def set_nllb_model(self, nllb_model: str):
         """ローカル翻訳モデルを変更する"""
         if self.nllb_model != nllb_model:
             self.nllb_model = nllb_model
             self.local_translator = None  # 強制リロード
+            self._clear_cache()
 
     def set_engine(self, engine: str):
         """翻訳エンジンを切り替える ("cloud" または "local")"""
-        self.engine = engine
+        if self.engine != engine:
+            self.engine = engine
+            self._clear_cache()
 
     def ensure_local_loaded(self, progress_callback: Optional[Callable[[str], None]] = None):
         """ローカル翻訳モデルが未ロードなら事前ロードする"""
@@ -282,21 +321,53 @@ class TextTranslator:
 
         effective_source_lang = source_lang or self.source_lang
 
+        # 入力言語と翻訳先が同一なら翻訳せずに原文を返す（無駄なAPI呼び出しを防ぐ）
+        if (
+            effective_source_lang
+            and effective_source_lang != "auto"
+            and canonical_language_code(effective_source_lang)
+            == canonical_language_code(target_lang)
+        ):
+            return f"{speaker_prefix}{stripped_text}"
+
+        cache_key = (
+            self.engine,
+            self.nllb_model if self.engine == "local" else "",
+            stripped_text,
+            effective_source_lang,
+            target_lang,
+        )
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return f"{speaker_prefix}{cached}"
+
+        # 失敗結果（[翻訳不可: ...] やローカル失敗後のクラウド代替）はキャッシュしない
+        cacheable = True
+        result: Optional[str] = None
+
         # ローカルAI翻訳モード
         if self.engine == "local":
             try:
                 if self.local_translator is None:
                     self.local_translator = LocalNLLBTranslator(model_name=self.nllb_model)
-                res = self.local_translator.translate(
+                result = self.local_translator.translate(
                     stripped_text,
                     source_lang=effective_source_lang,
                     target_lang=target_lang,
                 )
-                return f"{speaker_prefix}{res}"
             except Exception as e_local:
                 print(f"[TextTranslator] ローカル翻訳失敗のためクラウドへフォールバックします: {e_local}")
-                # クラウド翻訳へフォールバック
+                cacheable = False
 
-        # クラウド翻訳モード
-        cloud_res = self._translate_cloud(stripped_text, target_lang=target_lang, source_lang=effective_source_lang)
-        return f"{speaker_prefix}{cloud_res}"
+        # クラウド翻訳モード（ローカル失敗時のフォールバックを含む）
+        if result is None:
+            result = self._translate_cloud(
+                stripped_text, target_lang=target_lang, source_lang=effective_source_lang
+            )
+            if not result or result.startswith("[翻訳不可"):
+                cacheable = False
+
+        if cacheable and result:
+            self._cache_put(cache_key, result)
+
+        return f"{speaker_prefix}{result}"

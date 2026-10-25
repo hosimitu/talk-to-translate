@@ -10,6 +10,7 @@ from src.config import (
     ConfigManager,
     DEFAULT_CONFIG,
     INPUT_LANGUAGES,
+    PRIVACY_NOTICE_VERSION,
     TARGET_LANGUAGES,
     TRANSCRIPTION_MODELS,
     TRANSLATION_ENGINES,
@@ -24,7 +25,6 @@ from src.translator import (
     parse_source_language_code,
     parse_translation_engine,
 )
-from src.separator import SpeechSeparator
 
 # テーマ設定
 ctk.set_appearance_mode("Dark")
@@ -66,9 +66,8 @@ class AppUI(ctk.CTk):
         self.transcriber: TranscriptionEngine | None = None
         self.processor: AudioProcessor | None = None
 
-        # 話者識別エンジン & 音源分離エンジン
+        # 話者識別エンジン
         self.diarizer = SpeakerDiarizer()
-        self.separator = SpeechSeparator()
 
         # 翻訳エンジンの初期化（保存された設定を反映）
         saved_engine = self.config.get("translation_engine", "")
@@ -81,8 +80,12 @@ class AppUI(ctk.CTk):
         )
 
         # スレッド間通信用キュー
-        self.transcription_queue: queue.Queue[str] = queue.Queue()
-        self.translation_queue: queue.Queue[str] = queue.Queue()
+        self.transcription_queue: queue.Queue[tuple[str, Optional[str]]] = queue.Queue()
+        self.translation_queue: queue.Queue[tuple[int, str]] = queue.Queue()
+        # 翻訳は単一ワーカーで順番に処理する（応答順の入れ替わりを防ぐ）
+        self._translation_requests: queue.Queue[Optional[tuple[int, list[str], str, str]]] = queue.Queue()
+        self._translation_worker: Optional[threading.Thread] = None
+        self._translation_generation = 0  # 全消去時に加算し、古い翻訳結果を破棄する
 
         # 録音中フラグ
         self.is_recording = False
@@ -96,6 +99,12 @@ class AppUI(ctk.CTk):
         self._buffer_max_lines = 3
         self._buffer_max_chars = 70
 
+        # 翻訳言語コードのキャッシュ（ワーカースレッドからTkウィジェットを参照しないため）
+        self._source_lang = "auto"
+        self._target_lang = "en"
+        # 直近の発話から検出された言語（入力言語が「自動検出」のときに使用）
+        self._last_source_lang: Optional[str] = None
+
         # グリッドのウェイト設定（中央のテキストエリアが伸縮）
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -104,33 +113,90 @@ class AppUI(ctk.CTk):
         self._build_header_panel()
         self._build_text_areas()
         self._build_footer_panel()
+        self._sync_language_codes()
 
         # ウィンドウ終了時のハンドラ登録
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
 
+        # 翻訳専用ワーカーを起動（結果の順序保証）
+        self._start_translation_worker()
+
         # キューの監視ループを開始
         self._poll_queues()
 
-    def _poll_queues(self):
-        """ワーカースレッドからのキューをメインスレッドで安全に処理"""
-        # 文字起こしキューの処理
-        while not self.transcription_queue.empty():
-            try:
-                text = self.transcription_queue.get_nowait()
-                self.append_transcription(text)
-            except queue.Empty:
+    def _start_translation_worker(self):
+        """翻訳専用の単一ワーカースレッドを起動する"""
+        if self._translation_worker is not None and self._translation_worker.is_alive():
+            return
+        self._translation_worker = threading.Thread(
+            target=self._translation_worker_loop,
+            name="translation-worker",
+            daemon=True,
+        )
+        self._translation_worker.start()
+
+    def _translation_worker_loop(self):
+        """キューに積まれた翻訳ジョブを到着順に処理する"""
+        while True:
+            job = self._translation_requests.get()
+            if job is None:  # 終了シグナル
                 break
 
-        # 翻訳キューの処理
-        while not self.translation_queue.empty():
+            generation, lines, target_lang, source_lang = job
             try:
-                translated_text = self.translation_queue.get_nowait()
-                self.append_translation(translated_text)
-            except queue.Empty:
-                break
+                translated = self._translate_buffered_lines(lines, target_lang, source_lang)
+            except Exception as e:
+                print(f"[UI] 翻訳処理に失敗しました: {e}")
+                continue
+
+            if not translated:
+                continue
+            # 全消去などで世代が進んでいたら古い結果は捨てる
+            if generation != self._translation_generation:
+                continue
+            self.translation_queue.put((generation, translated))
+
+    def _poll_queues(self):
+        """ワーカースレッドからのキューをメインスレッドで安全に処理"""
+        self._drain_transcription_queue()
+        self._drain_translation_queue()
 
         # 50ミリ秒ごとに再帰チェック
         self.after(50, self._poll_queues)
+
+    def _drain_transcription_queue(self):
+        """文字起こし結果をテキストボックスへ反映し、検出言語を記録する"""
+        while True:
+            try:
+                item = self.transcription_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if isinstance(item, tuple) and len(item) == 2:
+                text, lang = item
+                if lang:
+                    self._last_source_lang = lang
+            else:
+                text = item
+
+            self.append_transcription(text)
+
+    def _drain_translation_queue(self):
+        """翻訳結果のうち、現在の世代のものだけを反映する"""
+        while True:
+            try:
+                item = self.translation_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if isinstance(item, tuple) and len(item) == 2:
+                generation, text = item
+                if generation != self._translation_generation:
+                    continue
+            else:
+                text = item
+
+            self.append_translation(text)
 
     def _get_audio_input_devices(self) -> list[str]:
         """利用可能なマイク（入力）デバイスの一覧を取得"""
@@ -252,20 +318,20 @@ class AppUI(ctk.CTk):
         else:
             self.engine_option.set(DEFAULT_CONFIG["translation_engine"])
 
-        # 6. 話者識別（旧・音源分離）チェックボックス (2行目の後半に配置)
-        self.sep_checkbox = ctk.CTkCheckBox(
+        # 6. 話者識別チェックボックス (2行目の後半に配置)
+        self.diarization_checkbox = ctk.CTkCheckBox(
             header_frame,
             text="👥 話者識別（3D-speaker ONNX / 多人数対応）",
             font=ctk.CTkFont(size=12),
-            command=self._on_toggle_separation,
+            command=self._on_toggle_diarization,
         )
-        self.sep_checkbox.grid(row=2, column=2, columnspan=2, padx=15, pady=(6, 12), sticky="w")
+        self.diarization_checkbox.grid(row=2, column=2, columnspan=2, padx=15, pady=(6, 12), sticky="w")
 
-        # 保存されていた音源分離の復元
-        if self.config.get("enable_separation", False):
-            self.sep_checkbox.select()
+        # 保存されていた話者識別設定の復元
+        if self.config.get("enable_diarization", False):
+            self.diarization_checkbox.select()
         else:
-            self.sep_checkbox.deselect()
+            self.diarization_checkbox.deselect()
 
     def _build_text_areas(self):
         """中央のテキストエリア（文字起こし結果と翻訳結果の2ペイン）"""
@@ -392,6 +458,78 @@ class AppUI(ctk.CTk):
         )
         self.clear_button.grid(row=0, column=2, padx=20, pady=15, sticky="e")
 
+        # プライバシー表示（クラウド翻訳時の外部送信を常時明示）
+        self.privacy_badge = ctk.CTkLabel(
+            footer_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+        )
+        self.privacy_badge.grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 10), sticky="w")
+
+        # 初回起動時の通知バナー（モーダルにせず、その場で閉じられる）
+        self.privacy_notice = ctk.CTkFrame(
+            footer_frame,
+            fg_color=("#e7f1ff", "#1f3a5f"),
+            corner_radius=8,
+        )
+        self.privacy_notice.grid(row=2, column=0, columnspan=3, padx=15, pady=(0, 12), sticky="ew")
+        self.privacy_notice.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self.privacy_notice,
+            text=(
+                "☁ クラウド翻訳を選択すると、翻訳対象のテキストのみが外部（Google / MyMemory）へ"
+                "送信されます。音声そのものは送信されません。完全オフラインで使う場合は"
+                "「ローカル翻訳 (NLLB)」を選択してください。"
+            ),
+            font=ctk.CTkFont(size=11),
+            justify="left",
+            wraplength=680,
+        ).grid(row=0, column=0, padx=12, pady=10, sticky="w")
+
+        ctk.CTkButton(
+            self.privacy_notice,
+            text="了解",
+            width=60,
+            height=26,
+            command=self._acknowledge_privacy_notice,
+        ).grid(row=0, column=1, padx=12, pady=10, sticky="e")
+
+        self._update_privacy_badge()
+        self._refresh_privacy_notice()
+
+    def _current_translation_engine_kind(self) -> str:
+        """現在選択されている翻訳エンジン種別 ("cloud" / "local") を返す"""
+        engine, _ = parse_translation_engine(self.engine_option.get())
+        return engine
+
+    def _update_privacy_badge(self):
+        """翻訳エンジンに応じて外部送信の有無を表示する"""
+        if self._current_translation_engine_kind() == "cloud":
+            self.privacy_badge.configure(
+                text="☁ 外部送信: 有効（翻訳テキストのみ送信）",
+                text_color="#ffc107",
+            )
+        else:
+            self.privacy_badge.configure(
+                text="🔒 ローカルのみ（外部送信なし）",
+                text_color="#28a745",
+            )
+
+    def _refresh_privacy_notice(self):
+        """同意済みなら通知バナーを隠す"""
+        if self._get_privacy_ack_version() >= PRIVACY_NOTICE_VERSION:
+            self.privacy_notice.grid_remove()
+        else:
+            self.privacy_notice.grid()
+
+    def _acknowledge_privacy_notice(self):
+        """プライバシー通知を確認済みとして保存し、バナーを閉じる"""
+        self.config["privacy_ack_version"] = PRIVACY_NOTICE_VERSION
+        self._save_current_settings()
+        self.privacy_notice.grid_remove()
+
     def _get_selected_device_index(self) -> int | None:
         """選択されているマイクのデバイス番号を取得"""
         selected = self.mic_option.get()
@@ -404,8 +542,9 @@ class AppUI(ctk.CTk):
 
     def _on_transcription_received(self, text: str):
         """バックグラウンドスレッドからの文字起こし結果を受け取りキューへ追加＆小バッファリング翻訳実行"""
-        # 左側の文字起こしテキストボックスへは即座に反映
-        self.transcription_queue.put(text)
+        # 左側の文字起こしテキストボックスへは即座に反映（検出言語も併せて渡す）
+        detected_lang = getattr(self.transcriber, "last_detected_language", None)
+        self.transcription_queue.put((text, detected_lang))
 
         stripped = text.strip()
         if not stripped:
@@ -462,18 +601,20 @@ class AppUI(ctk.CTk):
         buffered_lines = list(self._translation_buffer)
         self._translation_buffer.clear()
 
-        source_lang = parse_source_language_code(self.input_lang_option.get())
-        target_lang = parse_target_language_code(self.target_lang_option.get())
-        threading.Thread(
-            target=self._run_buffered_translation_thread,
-            args=(buffered_lines, target_lang, source_lang),
-            daemon=True,
-        ).start()
+        # Tkウィジェットはメインスレッド専用のため、キャッシュ済みの言語コードを使う。
+        # 入力言語が「自動検出」の場合は、直近の発話で検出された言語を優先する。
+        source_lang = self._source_lang
+        if source_lang == "auto" and self._last_source_lang:
+            source_lang = self._last_source_lang
+        target_lang = self._target_lang
+        self._translation_requests.put(
+            (self._translation_generation, buffered_lines, target_lang, source_lang)
+        )
 
-    def _run_buffered_translation_thread(self, lines: list[str], target_lang: str, source_lang: str = "auto"):
-        """バッファされた複数行を自然に結合して翻訳を実行"""
+    def _translate_buffered_lines(self, lines: list[str], target_lang: str, source_lang: str = "auto") -> str:
+        """バッファされた複数行を自然に結合して翻訳する（単一ワーカーから呼ばれる）"""
         if not lines:
-            return
+            return ""
 
         first_speaker = ""
         m = re.match(r"^(\[話者\d+\])\s*(.*)$", lines[0])
@@ -489,7 +630,7 @@ class AppUI(ctk.CTk):
                 cleaned_parts.append(content)
 
         if not cleaned_parts:
-            return
+            return ""
 
         # CJK（日本語・中国語）の場合は読点や句点等を考慮して結合
         first_content = cleaned_parts[0]
@@ -506,15 +647,9 @@ class AppUI(ctk.CTk):
         if first_speaker:
             combined_text = f"{first_speaker} {combined_text}"
 
-        self._run_translation_thread(combined_text, target_lang, source_lang)
-
-    def _run_translation_thread(self, text: str, target_lang: str, source_lang: str = "auto"):
-        """別スレッドで翻訳を実行し、翻訳キューへ追加"""
-        translated_text = self.translator.translate(
-            text, target_lang=target_lang, source_lang=source_lang
+        return self.translator.translate(
+            combined_text, target_lang=target_lang, source_lang=source_lang
         )
-        if translated_text:
-            self.translation_queue.put(translated_text)
 
     def _toggle_recording(self):
         """録音ボタンのトグル動作（マイクストリーム＆文字起こしエンジンの開始・停止）"""
@@ -523,6 +658,7 @@ class AppUI(ctk.CTk):
             device_index = self._get_selected_device_index()
             model_name = parse_model_size(self.model_option.get())
             lang_code = parse_language_code(self.input_lang_option.get())
+            self._last_source_lang = None
 
             self.status_label.configure(text=f"モデル準備中 ({model_name})...", text_color="#ffc107")
             self.record_button.configure(state="disabled")
@@ -555,15 +691,29 @@ class AppUI(ctk.CTk):
             self.input_lang_option.configure(state="normal")
             self.engine_option.configure(state="normal")
 
+    def _sync_language_codes(self):
+        """UIの言語選択を翻訳用コードへ変換してキャッシュ（メインスレッドで実行）"""
+        self._source_lang = parse_source_language_code(self.input_lang_option.get())
+        self._target_lang = parse_target_language_code(self.target_lang_option.get())
+
+    def _get_privacy_ack_version(self) -> int:
+        """保存済みのプライバシー同意バージョンを取得（不正値は0）"""
+        value = self.config.get("privacy_ack_version", 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+
     def _save_current_settings(self, *args):
         """現在のUI設定を config.json に保存"""
+        self._sync_language_codes()
         current_settings = {
             "transcription_model": self.model_option.get(),
             "translation_engine": self.engine_option.get(),
             "input_lang": self.input_lang_option.get(),
             "target_lang": self.target_lang_option.get(),
-            "enable_separation": (self.sep_checkbox.get() == 1),
+            "enable_diarization": (self.diarization_checkbox.get() == 1),
             "mic_device": self.mic_option.get(),
+            "privacy_ack_version": self._get_privacy_ack_version(),
         }
         self.config_manager.save_config(current_settings)
 
@@ -576,6 +726,10 @@ class AppUI(ctk.CTk):
                     self._buffer_timer.cancel()
                     self._buffer_timer = None
                 self._translation_buffer.clear()
+            # 翻訳ワーカーを停止
+            self._translation_requests.put(None)
+            if self._translation_worker is not None:
+                self._translation_worker.join(timeout=1.0)
             if self.processor:
                 self.processor.stop()
             self.recorder.stop()
@@ -628,11 +782,12 @@ class AppUI(ctk.CTk):
                 text="ステータス: 準備完了 (クラウド翻訳)",
                 text_color="#28a745",
             )
+        self._update_privacy_badge()
         self._save_current_settings()
 
-    def _on_toggle_separation(self):
-        """話者識別（旧・音源分離）チェックボックスの切替ハンドラ"""
-        is_enabled = (self.sep_checkbox.get() == 1)
+    def _on_toggle_diarization(self):
+        """話者識別チェックボックスの切替ハンドラ"""
+        is_enabled = (self.diarization_checkbox.get() == 1)
         if self.processor:
             self.processor.enable_diarization = is_enabled
 
@@ -664,13 +819,12 @@ class AppUI(ctk.CTk):
                 transcriber=self.transcriber,
                 on_transcription_callback=self._on_transcription_received,
                 diarizer=self.diarizer,
-                separator=self.separator,
                 silence_threshold=0.006,
                 silence_duration_sec=0.8,
                 min_speech_duration_sec=0.3,
                 on_activity_callback=self._on_audio_activity,
             )
-            self.processor.enable_diarization = (self.sep_checkbox.get() == 1)
+            self.processor.enable_diarization = (self.diarization_checkbox.get() == 1)
 
             # マイク録音開始
             self.recorder.start(device_index=device_index)
@@ -744,27 +898,50 @@ class AppUI(ctk.CTk):
         self.after(1200, lambda: button.configure(text=original_text))
 
     def _clear_all_text(self):
-        """全テキストエリアの内容を消去"""
+        """全テキストエリアの内容を消去（実行中の翻訳結果も破棄）"""
         with self._buffer_lock:
             if self._buffer_timer is not None:
                 self._buffer_timer.cancel()
                 self._buffer_timer = None
             self._translation_buffer.clear()
+            # 世代を進め、処理中の翻訳が後から復活しないようにする
+            self._translation_generation += 1
+
+        # 未反映の翻訳結果を破棄
+        while True:
+            try:
+                self.translation_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._last_source_lang = None
         self.transcribe_textbox.delete("1.0", tk.END)
         self.translate_textbox.delete("1.0", tk.END)
         self.diarizer.reset()
 
+    @staticmethod
+    def _is_scrolled_to_bottom(textbox: ctk.CTkTextbox) -> bool:
+        """テキストボックスが最下部に表示されているか"""
+        try:
+            return textbox.yview()[1] >= 0.999
+        except Exception:
+            return True
+
     def append_transcription(self, text: str):
-        """文字起こしテキストを末尾に追加し、自動スクロールする"""
+        """文字起こしテキストを末尾に追加し、最下部にいるときだけ自動スクロールする"""
         if not text:
             return
+        at_bottom = self._is_scrolled_to_bottom(self.transcribe_textbox)
         self.transcribe_textbox.insert(tk.END, text + "\n")
-        self.transcribe_textbox.see(tk.END)
+        if at_bottom:
+            self.transcribe_textbox.see(tk.END)
 
     def append_translation(self, text: str):
-        """翻訳テキストを末尾に追加し、自動スクロールする"""
+        """翻訳結果を末尾に追加し、最下部にいるときだけ自動スクロールする"""
         if not text:
             return
+        at_bottom = self._is_scrolled_to_bottom(self.translate_textbox)
         self.translate_textbox.insert(tk.END, text + "\n")
-        self.translate_textbox.see(tk.END)
+        if at_bottom:
+            self.translate_textbox.see(tk.END)
 

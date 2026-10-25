@@ -3,11 +3,11 @@ Talk-to-Translate 文字起こしモジュール
 SenseVoice (ONNX) と faster-whisper の両方をシームレスに切り替えて利用できます。
 """
 
-from typing import Optional, Union
+from typing import Optional
 import numpy as np
 from faster_whisper import WhisperModel
 from src.config import TRANSCRIPTION_MODELS
-from src.sensevoice_engine import SenseVoiceEngine
+from src.sensevoice_engine import SenseVoiceEngine, normalize_language
 
 
 # UIの選択肢（src/config.py）と内部モデル名の対応表
@@ -55,6 +55,9 @@ class TranscriptionEngine:
         self.device = device
         self.compute_type = compute_type
 
+        # 直近の文字起こしで検出された言語（翻訳側のソース言語推定に利用）
+        self.last_detected_language: Optional[str] = None
+
         # エンジンのインスタンス
         self.sensevoice_engine: Optional[SenseVoiceEngine] = None
         self.whisper_model: Optional[WhisperModel] = None
@@ -94,7 +97,11 @@ class TranscriptionEngine:
         if self.model_size == "sensevoice":
             if self.sensevoice_engine is None:
                 self._load_model()
-            return self.sensevoice_engine.transcribe(audio_data, language=language)
+            text = self.sensevoice_engine.transcribe(audio_data, language=language)
+            detected = self.sensevoice_engine.last_detected_language
+            if detected:
+                self.last_detected_language = detected
+            return text
 
         # --- 2. Whisper (バックアップ・長文汎用) ---
         if self.whisper_model is None:
@@ -104,7 +111,7 @@ class TranscriptionEngine:
         # Whisper側の二重VADフィルタ（vad_filter=True）は無効化（高速化・短文誤カット防止・アセット依存解消）
         # チャンクごとの独立推論を行い、プロンプト・前文起因のハルシネーション（繰り返しループ）を防ぐため
         # condition_on_previous_text=False を指定
-        segments, _ = self.whisper_model.transcribe(
+        segments, info = self.whisper_model.transcribe(
             audio_data,
             language=language,
             condition_on_previous_text=False,
@@ -112,6 +119,10 @@ class TranscriptionEngine:
             beam_size=3,
             temperature=0.0,
         )
+
+        detected = normalize_language(getattr(info, "language", None))
+        if detected:
+            self.last_detected_language = detected
 
         texts = [
             segment.text.strip()

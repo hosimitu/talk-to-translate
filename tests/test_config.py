@@ -24,6 +24,7 @@ def test_default_config():
         assert loaded == DEFAULT_CONFIG
         assert loaded["transcription_model"] == "SenseVoice-Small (超高速・日中英推奨)"
         assert loaded["translation_engine"] == "クラウド翻訳 (Google/MyMemory) (推奨)"
+        assert loaded["privacy_ack_version"] == 0
         print("[OK] デフォルト設定の読み込みテスト成功")
 
 
@@ -46,7 +47,7 @@ def test_save_and_load_config():
             "translation_engine": "ローカル翻訳 (NLLB 600M) (推奨)",
             "input_lang": "日本語 (ja)",
             "target_lang": "英語 (en)",
-            "enable_separation": True,
+            "enable_diarization": True,
             "mic_device": "1: USB Microphone",
         }
 
@@ -59,7 +60,7 @@ def test_save_and_load_config():
         assert loaded["translation_engine"] == "ローカル翻訳 (NLLB 600M) (推奨)"
         assert loaded["input_lang"] == "日本語 (ja)"
         assert loaded["target_lang"] == "英語 (en)"
-        assert loaded["enable_separation"] is True
+        assert loaded["enable_diarization"] is True
         assert loaded["mic_device"] == "1: USB Microphone"
         print("[OK] 設定の保存・再読み込みテスト成功")
 
@@ -106,7 +107,7 @@ def test_invalid_values_fall_back():
             "translation_engine": 123,
             "input_lang": ["日本語 (ja)"],
             "target_lang": "Klingon",
-            "enable_separation": "yes",
+            "enable_diarization": "yes",
             "mic_device": None,
             "unknown_key": "value",
         }
@@ -129,6 +130,7 @@ def test_legacy_values_are_migrated():
             "translation_engine": "ローカル翻訳 (NLLB 600M)",
             "input_lang": "ja",
             "target_lang": "日本語",
+            "enable_separation": True,
         }
         with open(fake_config_path, "w", encoding="utf-8") as f:
             json.dump(legacy_settings, f, ensure_ascii=False)
@@ -139,6 +141,8 @@ def test_legacy_values_are_migrated():
         assert loaded["translation_engine"] == "ローカル翻訳 (NLLB 600M) (推奨)"
         assert loaded["input_lang"] == "日本語 (ja)"
         assert loaded["target_lang"] == "日本語 (ja)"
+        # 旧キー enable_separation が enable_diarization に引き継がれること
+        assert loaded["enable_diarization"] is True
         print("[OK] 旧表記のマイグレーションテスト成功")
 
 
@@ -154,7 +158,29 @@ def test_save_normalizes_values():
             saved = json.load(f)
         assert saved["translation_engine"] == "ローカル翻訳 (NLLB 1.3B) (推奨)"
         assert saved["config_version"] == CONFIG_VERSION
+        # アトミック書き込みの一時ファイルが残っていないこと
+        assert not [name for name in os.listdir(tmpdir) if name.startswith(".config-")]
         print("[OK] 保存時の正規化テスト成功")
+
+
+def test_privacy_ack_persistence():
+    """プライバシー同意バージョンが保存・復元され、不正値は0に補正されること"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_config_path = os.path.join(tmpdir, "config.json")
+        manager = ConfigManager(custom_path=fake_config_path)
+
+        manager.save_config({"privacy_ack_version": 1})
+        assert manager.load_config()["privacy_ack_version"] == 1
+
+        # UI からの部分保存で同意状態が失われないこと
+        manager.save_config({"target_lang": "英語 (en)", "privacy_ack_version": 1})
+        assert manager.load_config()["privacy_ack_version"] == 1
+
+        # 不正値は 0 に補正
+        with open(fake_config_path, "w", encoding="utf-8") as f:
+            json.dump({"privacy_ack_version": "yes"}, f)
+        assert manager.load_config()["privacy_ack_version"] == 0
+        print("[OK] プライバシー同意バージョンの永続化テスト成功")
 
 
 if __name__ == "__main__":
@@ -166,4 +192,5 @@ if __name__ == "__main__":
     test_invalid_values_fall_back()
     test_legacy_values_are_migrated()
     test_save_normalizes_values()
+    test_privacy_ack_persistence()
     print("すべての設定管理テストが正常に通過しました！")

@@ -1,7 +1,7 @@
 """音声前処理モジュールの単体テストスクリプト"""
 
 import numpy as np
-from src.processor import preprocess_audio
+from src.processor import preprocess_audio, compute_effective_threshold
 
 
 def test_preprocess_audio():
@@ -26,6 +26,35 @@ def test_preprocess_audio():
     zero_out = preprocess_audio(zero_signal)
     assert np.all(zero_out == 0)
     print("[OK] 無音信号の安全処理確認")
+
+
+def test_effective_threshold_adaptation():
+    """騒がしい環境でも閾値が追従して上がること"""
+    # 静かな環境: 下限 0.003
+    assert compute_effective_threshold(0.006, 0.001) == 0.003
+    # 騒がしい環境: 基準値の3倍 (0.018) まで許容
+    assert abs(compute_effective_threshold(0.006, 0.010) - 0.018) < 1e-9
+    # 極端に大きいノイズフロアでも上限を超えない
+    assert abs(compute_effective_threshold(0.006, 1.0) - 0.018) < 1e-9
+    print("[OK] VAD有効閾値の環境適応テスト成功")
+
+
+def test_audio_queue_is_bounded():
+    """キュー上限を超えた場合に古いチャンクが破棄され、時刻が付与されること"""
+    from src.audio import AudioRecorder
+
+    recorder = AudioRecorder(sample_rate=16000)
+    recorder._is_recording = True
+    for _ in range(AudioRecorder.MAX_QUEUED_CHUNKS + 10):
+        recorder._callback(np.zeros(16, dtype=np.float32), 16, None, None)
+
+    assert recorder.audio_queue.qsize() == AudioRecorder.MAX_QUEUED_CHUNKS
+    assert recorder.dropped_chunks == 10
+
+    timestamp, chunk = recorder.get_chunk_with_timestamp(timeout=0.1)
+    assert timestamp is not None
+    assert chunk is not None and len(chunk) == 16
+    print("[OK] 音声キュー上限・タイムスタンプ付与テスト成功")
 
 
 def test_audio_processor_diarization():
@@ -100,6 +129,8 @@ def test_audio_processor_vad_and_short_speech():
 
 if __name__ == "__main__":
     test_preprocess_audio()
+    test_effective_threshold_adaptation()
+    test_audio_queue_is_bounded()
     test_audio_processor_diarization()
     test_audio_processor_vad_and_short_speech()
     print("すべての音声前処理・プロセッサテストが正常に通過しました！")

@@ -4,6 +4,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.transcriber import parse_language_code, parse_model_size, TranscriptionEngine
+from src.sensevoice_engine import normalize_language
 
 
 def test_parsers():
@@ -15,6 +16,16 @@ def test_parsers():
     assert parse_model_size("SenseVoice-Small (超高速・日中英推奨)") == "sensevoice"
     assert parse_model_size("Whisper: large-v3-turbo (高精度)") == "large-v3-turbo"
     assert parse_model_size("Whisper: small (軽量)") == "small"
+
+    # SenseVoice の言語タグ抽出（翻訳側のソース言語推定に使用）
+    assert normalize_language("<|ja|><|NEUTRAL|><|Speech|>こんにちは") == "ja"
+    assert normalize_language("<|zh|><|NEUTRAL|>你好") == "zh-CN"
+    assert normalize_language("<|en|>hello") == "en"
+    assert normalize_language("<|ko|>안녕") == "ko"
+    assert normalize_language("zh-CN") == "zh-CN"
+    assert normalize_language("auto") is None
+    assert normalize_language("") is None
+    assert normalize_language(None) is None
     print("[OK] パース関数のテスト成功")
 
 

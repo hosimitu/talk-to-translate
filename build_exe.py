@@ -1,6 +1,6 @@
 """
 Talk-to-Translate EXE ビルドスクリプト (v1.4.1)
-PyInstaller を使用して、NLLB-200ローカル翻訳、MossFormer2、SenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
+PyInstaller を使用して、NLLB-200ローカル翻訳、SenseVoice/Whisperを含むスタンドアロン Windows 実行可能ファイル (.exe) を構築します。
 """
 
 import os
@@ -24,7 +24,6 @@ def build():
         # 静的アセット・テーマ・設定の同梱
         "--collect-data", "customtkinter",
         "--collect-data", "sherpa_onnx",
-        "--collect-data", "clearvoice",
         "--collect-data", "transformers",
         "--collect-data", "faster_whisper",
         # C++ / ONNX / Torch 関連DLLの同梱
@@ -37,7 +36,6 @@ def build():
         "--collect-submodules", "faster_whisper",
         "--collect-submodules", "sherpa_onnx",
         "--collect-submodules", "huggingface_hub",
-        "--collect-submodules", "clearvoice",
         "--collect-submodules", "soundfile",
         "--collect-submodules", "transformers",
         # エントリーポイント

@@ -9,10 +9,15 @@ PyInstallerでEXE化された環境や管理者権限フォルダへの配置で
 import json
 import os
 import sys
+import tempfile
 from typing import Any, Dict
 
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2  # v2: enable_separation を enable_diarization に統合
+
+# プライバシー通知（クラウド翻訳時の外部送信）の同意バージョン。
+# 文言を変更した場合はこの値を上げると、既存ユーザーにも再通知される。
+PRIVACY_NOTICE_VERSION = 1
 
 # UIの選択肢（config.json の値域とデフォルト値の唯一の定義元）
 TRANSCRIPTION_MODELS = [
@@ -38,8 +43,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "translation_engine": TRANSLATION_ENGINES[0],
     "input_lang": INPUT_LANGUAGES[0],
     "target_lang": TARGET_LANGUAGES[0],
-    "enable_separation": False,
+    "enable_diarization": False,
     "mic_device": "",
+    "privacy_ack_version": 0,
 }
 
 # 値の妥当性検証に使う選択肢一覧（DEFAULT_CONFIG がここに含まれることをテストで保証）
@@ -133,16 +139,44 @@ def normalize_config(data: Dict[str, Any]) -> Dict[str, Any]:
     config["input_lang"] = normalize_input_language(data.get("input_lang"))
     config["target_lang"] = normalize_target_language(data.get("target_lang"))
 
-    enable_separation = data.get("enable_separation")
-    if isinstance(enable_separation, bool):
-        config["enable_separation"] = enable_separation
+    enable_diarization = data.get("enable_diarization")
+    if not isinstance(enable_diarization, bool):
+        # 旧バージョン（v1）のキー名との互換性
+        enable_diarization = data.get("enable_separation")
+    if isinstance(enable_diarization, bool):
+        config["enable_diarization"] = enable_diarization
 
     mic_device = data.get("mic_device")
     if isinstance(mic_device, str):
         config["mic_device"] = mic_device
 
+    privacy_ack = data.get("privacy_ack_version")
+    if isinstance(privacy_ack, bool) or not isinstance(privacy_ack, int) or privacy_ack < 0:
+        privacy_ack = 0
+    config["privacy_ack_version"] = privacy_ack
+
     config["config_version"] = CONFIG_VERSION
     return config
+
+
+def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
+    """JSON を一時ファイル経由でアトミックに書き込む（破損防止）"""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+
+    fd, tmp_path = tempfile.mkstemp(prefix=".config-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 class ConfigManager:
@@ -233,15 +267,13 @@ class ConfigManager:
         data_to_save = normalize_config(config_data)
 
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+            _write_json_atomic(path, data_to_save)
             return True
         except (OSError, PermissionError) as e:
             print(f"[ConfigManager] 主パスへの設定保存に失敗しました ({e})。AppDataへのフォールバックを試みます。")
             try:
                 fallback_path = os.path.join(self.get_appdata_dir(), self.FILENAME)
-                with open(fallback_path, "w", encoding="utf-8") as f:
-                    json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+                _write_json_atomic(fallback_path, data_to_save)
                 self._config_path = fallback_path
                 return True
             except Exception as e_fallback:

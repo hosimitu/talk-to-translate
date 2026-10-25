@@ -11,7 +11,6 @@ import numpy as np
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine
 from src.diarizer import SpeakerDiarizer
-from src.separator import SpeechSeparator
 
 
 def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: float = 6.0) -> np.ndarray:
@@ -35,6 +34,16 @@ def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: floa
     return np.clip(normalized, -1.0, 1.0)
 
 
+def compute_effective_threshold(silence_threshold: float, noise_floor: float) -> float:
+    """
+    環境音に応じた有音判定の閾値を計算する。
+
+    下限は 0.003、上限は基準閾値の3倍まで許容する。上限を固定値にすると
+    騒がしい環境でノイズフロアが上がっても閾値が追従できず、無音を検出できなくなる。
+    """
+    return max(0.003, min(silence_threshold * 3.0, noise_floor * 2.5))
+
+
 class AudioProcessor:
     """発話区間と無音を検出し、文単位で文字起こし（+話者識別）を行うワーカー"""
 
@@ -44,7 +53,6 @@ class AudioProcessor:
         transcriber: TranscriptionEngine,
         on_transcription_callback: Callable[[str], None],
         diarizer: Optional[SpeakerDiarizer] = None,
-        separator: Optional[SpeechSeparator] = None,
         silence_threshold: float = 0.006,
         silence_duration_sec: float = 0.8,
         min_speech_duration_sec: float = 0.3,
@@ -57,7 +65,6 @@ class AudioProcessor:
         :param transcriber: TranscriptionEngine インスタンス
         :param on_transcription_callback: 文字起こし完了時に呼ばれるコールバック
         :param diarizer: SpeakerDiarizer インスタンス (推奨・多話者識別)
-        :param separator: SpeechSeparator インスタンス (互換用)
         :param silence_threshold: 有音判定の基準RMS値 (デフォルト0.006)
         :param silence_duration_sec: 発話終了とみなす無音継続時間 (秒)
         :param min_speech_duration_sec: 処理対象とする最小発話時間 (秒、短文相槌に対応)
@@ -68,7 +75,6 @@ class AudioProcessor:
         self.transcriber = transcriber
         self.on_transcription_callback = on_transcription_callback
         self.diarizer = diarizer
-        self.separator = separator
         self.enable_diarization = False  # 話者識別のON/OFFフラグ
         self.on_activity_callback = on_activity_callback
 
@@ -81,15 +87,7 @@ class AudioProcessor:
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
         self._language: Optional[str] = None
-
-    @property
-    def enable_separation(self) -> bool:
-        """後方互換プロパティ"""
-        return self.enable_diarization
-
-    @enable_separation.setter
-    def enable_separation(self, value: bool):
-        self.enable_diarization = value
+        self._last_dropped_chunks = 0
 
     @property
     def is_running(self) -> bool:
@@ -102,6 +100,7 @@ class AudioProcessor:
 
         self._is_running = True
         self._language = language
+        self._last_dropped_chunks = 0
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
@@ -111,6 +110,15 @@ class AudioProcessor:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+
+    def _next_chunk(self) -> tuple[Optional[float], Optional[np.ndarray]]:
+        """録音側から音声チャンクと取得時刻を取得する（旧Recorder実装にも対応）"""
+        getter = getattr(self.recorder, "get_chunk_with_timestamp", None)
+        if callable(getter):
+            return getter(timeout=0.1)
+
+        chunk = self.recorder.get_chunk(timeout=0.1)
+        return (time.monotonic() if chunk is not None else None), chunk
 
     def _worker_loop(self):
         """音声ストリームから発話区間を検出し文字起こしを行うループ"""
@@ -125,18 +133,34 @@ class AudioProcessor:
         speech_start_time: Optional[float] = None
 
         while self._is_running:
-            chunk = self.recorder.get_chunk(timeout=0.1)
+            chunk_time, chunk = self._next_chunk()
             if chunk is None or len(chunk) == 0:
                 continue
 
+            # 推論が追いつかず音声が破棄された場合は、50チャンクごとに通知
+            dropped = getattr(self.recorder, "dropped_chunks", 0)
+            if dropped >= self._last_dropped_chunks + 50:
+                print(
+                    f"[AudioProcessor] 音声処理が追いつかず古い音声を破棄しました "
+                    f"(累計 {dropped} チャンク)"
+                )
+                self._last_dropped_chunks = dropped
+
+            # 取得時刻（録音時点）を基準に発話・無音の継続時間を判定する。
+            # 推論で処理が遅延しても、実際の音声上の時間関係が崩れない。
+            now = chunk_time if chunk_time is not None else time.monotonic()
             rms = float(np.sqrt(np.mean(chunk**2)))
 
-            # 動的ノイズフロアの追従更新（非発話時の緩やかな指数移動平均）
-            if not is_speaking and rms < self.silence_threshold * 2.0:
-                self.noise_floor = 0.95 * self.noise_floor + 0.05 * rms
+            # 動的ノイズフロアの追従更新（非発話時のみ。突発音の影響を抑えるため上限を設ける）
+            if not is_speaking:
+                self.noise_floor = 0.95 * self.noise_floor + 0.05 * min(
+                    rms, self.silence_threshold * 4.0
+                )
 
             # 実環境適応の有効閾値 (低感度マイクと高ノイズ環境の両方に対応)
-            effective_threshold = max(0.003, min(self.silence_threshold, self.noise_floor * 2.5))
+            effective_threshold = compute_effective_threshold(
+                self.silence_threshold, self.noise_floor
+            )
             is_sound = rms > effective_threshold
 
             # UI側の音量メーターや発話状態表示へ通知
@@ -145,8 +169,6 @@ class AudioProcessor:
                     self.on_activity_callback(rms, is_speaking or is_sound)
                 except Exception:
                     pass
-
-            now = time.time()
 
             if is_sound:
                 silence_start_time = None
@@ -205,23 +227,6 @@ class AudioProcessor:
                     speaker_tag = f"[{spk}] "
             except Exception as e:
                 print(f"[AudioProcessor] 話者識別スキップ（フォールバック）: {e}")
-        elif self.enable_separation and self.separator is not None:
-            # 旧音源分離（Separatorが明示的に指定された場合のフォールバック）
-            try:
-                tracks = self.separator.separate(audio_data, sample_rate)
-                if len(tracks) > 1:
-                    for i, track in enumerate(tracks):
-                        norm_track = preprocess_audio(track)
-                        try:
-                            text = self.transcriber.transcribe(norm_track, language=self._language)
-                            if text and text.strip():
-                                speaker_label = f"[話者{i+1}]"
-                                self.on_transcription_callback(f"{speaker_label} {text.strip()}")
-                        except Exception as e:
-                            print(f"[AudioProcessor Error] 分離音声(話者{i+1})の文字起こし失敗: {e}")
-                    return
-            except Exception as e:
-                print(f"[AudioProcessor] 音源分離スキップ（フォールバック）: {e}")
 
         # 3. 通常の文字起こし（話者タグ付き または タグなし）
         try:
