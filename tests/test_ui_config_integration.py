@@ -96,6 +96,15 @@ def test_p1_translation_pipeline_and_privacy():
             app._update_privacy_badge()
             assert "ローカルのみ" in app.privacy_badge.cget("text")
 
+            # 1b. モデルバッジがモデル選択と推論デバイスに追従する
+            app.model_option.set("SenseVoice-Small (超高速・日中英推奨)")
+            app._update_model_badge()
+            assert "SenseVoice" in app.model_badge.cget("text")
+            app.model_option.set("Whisper: small (軽量)")
+            app._update_model_badge()
+            assert "Whisper" in app.model_badge.cget("text")
+            assert any(label in app.model_badge.cget("text") for label in ("GPU", "CPU"))
+
             # 2. 同意するとバージョンが保存され、バナーが閉じる
             app.config["privacy_ack_version"] = 0
             app._refresh_privacy_notice()

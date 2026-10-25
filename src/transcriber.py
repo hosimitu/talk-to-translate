@@ -16,6 +16,23 @@ _MODEL_SIZE_BY_LABEL = dict(
 )
 
 
+def detect_acceleration() -> tuple[str, str]:
+    """
+    利用可能な推論デバイスと演算精度を返す。
+
+    CUDA対応GPUとCTranslate2のCUDAライブラリが揃っている場合のみ ("cuda", "float16")、
+    それ以外（未搭載・DLL不足・判定失敗）は ("cpu", "int8") を返す。
+    """
+    try:
+        import ctranslate2
+
+        if ctranslate2.get_cuda_device_count() > 0:
+            return "cuda", "float16"
+    except Exception:
+        pass
+    return "cpu", "int8"
+
+
 def parse_language_code(ui_language_text: str) -> Optional[str]:
     """UIの言語選択肢文字列から言語コードへ変換"""
     if "ja" in ui_language_text:
@@ -44,16 +61,24 @@ def parse_model_size(ui_model_text: str) -> str:
 class TranscriptionEngine:
     """SenseVoice または Whisper を統合管理する文字起こしエンジン"""
 
-    def __init__(self, model_size: str = "sensevoice", device: str = "cpu", compute_type: str = "int8"):
+    def __init__(
+        self,
+        model_size: str = "sensevoice",
+        device: Optional[str] = None,
+        compute_type: Optional[str] = None,
+    ):
         """
         初期化
         :param model_size: "sensevoice", "large-v3-turbo", "small"
-        :param device: "cpu"
-        :param compute_type: "int8"
+        :param device: "cpu" / "cuda"（未指定時はGPUを自動判定）
+        :param compute_type: "int8" / "float16"（未指定時はdeviceに応じて自動選択）
         """
+        default_device, default_compute_type = detect_acceleration()
         self.model_size = model_size
-        self.device = device
-        self.compute_type = compute_type
+        self.device = device or default_device
+        self.compute_type = compute_type or (
+            default_compute_type if self.device == "cuda" else "int8"
+        )
 
         # 直近の文字起こしで検出された言語（翻訳側のソース言語推定に利用）
         self.last_detected_language: Optional[str] = None
@@ -70,17 +95,34 @@ class TranscriptionEngine:
             if self.sensevoice_engine is None:
                 self.sensevoice_engine = SenseVoiceEngine()
         else:
-            # Whisperモデルのロード
-            self.whisper_model = WhisperModel(
-                self.model_size,
-                device=self.device,
-                compute_type=self.compute_type,
-            )
+            # Whisperモデルのロード（CUDA初期化失敗時はCPUへ自動フォールバック）
+            if self.whisper_model is None:
+                try:
+                    self.whisper_model = WhisperModel(
+                        self.model_size,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                    )
+                except Exception as e:
+                    if self.device == "cpu":
+                        raise
+                    print(
+                        f"[TranscriptionEngine] {self.device} でのモデル読み込みに失敗しました。"
+                        f"CPU (int8) で再試行します: {e}"
+                    )
+                    self.device = "cpu"
+                    self.compute_type = "int8"
+                    self.whisper_model = WhisperModel(
+                        self.model_size,
+                        device="cpu",
+                        compute_type="int8",
+                    )
 
     def change_model(self, model_size: str):
         """モデルを変更して再ロード"""
         if self.model_size != model_size:
             self.model_size = model_size
+            self.whisper_model = None
             self._load_model()
 
     def transcribe(self, audio_data: np.ndarray, language: Optional[str] = None) -> str:

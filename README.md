@@ -108,8 +108,8 @@ pip install -r requirements.txt
 ## 📖 使い方
 
 1. **設定（上部パネル）**:
-   - **マイクデバイス**: 使用するマイクを選択します。
-   - **AIモデル**: お使いのPCスペックに合わせて選択（SenseVoice-Small 推奨）。
+   - **マイクデバイス**: 使用するマイクを選択します（16kHz非対応のマイクでは、デバイス既定のサンプリングレートで録音し自動的に16kHzへ変換します）。
+   - **AIモデル**: お使いのPCスペックに合わせて選択（SenseVoice-Small 推奨）。Whisper 使用時は CUDA 対応 GPU があれば自動で GPU (float16)、無い場合は CPU (int8) で動作し、画面下部に使用デバイスを表示します。
    - **入力言語**: 通常は `自動検出 (auto)` のままでOKです。
    - **翻訳先言語**: 翻訳したい言語（英語、日本語、中国語）を選択します。
    - **翻訳エンジン**: `クラウド翻訳 (Google/MyMemory) (推奨)` または `ローカル翻訳 (NLLB 600M / 1.3B 推奨)` を選択します（デフォルトはクラウド）。
@@ -176,11 +176,15 @@ $env:PYTHONIOENCODING="utf-8"
 python tests/test_stream_protection.py
 python tests/test_config.py
 python tests/test_diarizer.py
+python tests/test_diarizer_policy.py
 python tests/test_processor.py
 python tests/test_transcriber.py
 python tests/test_translator.py
 python tests/test_ui_config_integration.py
 ```
+
+> `test_diarizer.py` / `test_transcriber.py` / `test_translator.py` の一部はモデルのダウンロードやネットワークに依存します。
+> `test_diarizer_policy.py` / `test_processor.py` / `test_config.py` はオフラインで実行できます。
 
 ---
 

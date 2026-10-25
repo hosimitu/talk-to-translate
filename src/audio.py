@@ -10,6 +10,38 @@ import numpy as np
 import sounddevice as sd
 
 
+def resample_audio(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarray:
+    """
+    音声を任意のサンプリングレートへ変換する（依存追加なしの軽量実装）。
+
+    ダウンサンプリング時は移動平均で高域を軽く減衰させてから線形補間する。
+    VAD・音声認識用途では十分な品質で、16kHz非対応マイクのフォールバックに使う。
+    """
+    if audio is None or len(audio) == 0:
+        return np.zeros(0, dtype=np.float32)
+    if source_rate <= 0 or target_rate <= 0 or source_rate == target_rate:
+        return audio.astype(np.float32, copy=False)
+
+    samples = audio.astype(np.float32, copy=False)
+
+    # エイリアシング抑制（間引き倍率ぶんの移動平均）
+    if target_rate < source_rate:
+        window = max(1, int(round(source_rate / target_rate)))
+        if window > 1 and len(samples) >= window:
+            kernel = np.ones(window, dtype=np.float32) / window
+            samples = np.convolve(samples, kernel, mode="same").astype(np.float32)
+
+    target_length = int(round(len(samples) * target_rate / source_rate))
+    if target_length <= 0:
+        return np.zeros(0, dtype=np.float32)
+    if target_length == len(samples):
+        return samples
+
+    src_positions = np.linspace(0.0, 1.0, num=len(samples), endpoint=False)
+    dst_positions = np.linspace(0.0, 1.0, num=target_length, endpoint=False)
+    return np.interp(dst_positions, src_positions, samples).astype(np.float32)
+
+
 class AudioRecorder:
     """マイクからの音声入力を取得・バッファリングするクラス"""
 
@@ -30,6 +62,8 @@ class AudioRecorder:
         self.dropped_chunks = 0
         self._stream: Optional[sd.InputStream] = None
         self._is_recording = False
+        # 実際にマイクを開いたレート（16kHz以外ならコールバックでリサンプルする）
+        self.input_sample_rate = sample_rate
 
     @property
     def is_recording(self) -> bool:
@@ -47,6 +81,8 @@ class AudioRecorder:
         # 1チャンネル分のデータをフラット化し、取得時刻とともにキューへ追加
         timestamp = time.monotonic()
         chunk = indata.copy().flatten()
+        if self.input_sample_rate != self.sample_rate:
+            chunk = resample_audio(chunk, self.input_sample_rate, self.sample_rate)
         try:
             self.audio_queue.put_nowait((timestamp, chunk))
         except queue.Full:
@@ -76,16 +112,57 @@ class AudioRecorder:
             except queue.Empty:
                 break
 
-        self._is_recording = True
         self.dropped_chunks = 0
-        self._stream = sd.InputStream(
-            samplerate=self.sample_rate,
+        self.input_sample_rate = self._select_input_sample_rate(device_index)
+        stream = sd.InputStream(
+            samplerate=self.input_sample_rate,
             channels=self.channels,
             dtype="float32",
             device=device_index,
             callback=self._callback,
         )
-        self._stream.start()
+        self._is_recording = True
+        try:
+            stream.start()
+        except Exception:
+            self._is_recording = False
+            stream.close()
+            raise
+        self._stream = stream
+
+    def _select_input_sample_rate(self, device_index: Optional[int]) -> int:
+        """
+        マイクが16kHzを受け付けるか検証し、不可ならデバイス既定のレートを使う。
+        （一部のBluetoothマイクなど、16kHz固定だとストリームを開けない場合のフォールバック）
+        """
+        try:
+            sd.check_input_settings(
+                device=device_index,
+                channels=self.channels,
+                samplerate=self.sample_rate,
+                dtype="float32",
+            )
+            return self.sample_rate
+        except Exception as e:
+            try:
+                info = (
+                    sd.query_devices(device_index, "input")
+                    if device_index is not None
+                    else sd.query_devices(kind="input")
+                )
+                fallback_rate = int(round(info.get("default_samplerate") or 0))
+            except Exception:
+                fallback_rate = 0
+
+            if fallback_rate <= 0 or fallback_rate == self.sample_rate:
+                # フォールバック先も決められない場合は、元のエラーをそのまま伝える
+                raise e
+
+            print(
+                f"[AudioRecorder] {self.sample_rate}Hzでマイクを開けないため、"
+                f"{fallback_rate}Hzで録音し 16kHz に変換します: {e}"
+            )
+            return fallback_rate
 
     def stop(self):
         """録音を停止する"""

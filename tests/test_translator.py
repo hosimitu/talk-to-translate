@@ -7,6 +7,7 @@ from src.translator import (
     parse_translation_engine,
     canonical_language_code,
     detect_language,
+    resolve_local_device,
     LocalNLLBTranslator,
     TextTranslator,
 )
@@ -145,9 +146,17 @@ def test_cache_and_same_language_skip():
     print("[OK] 同一言語スキップ・翻訳キャッシュのテスト成功")
 
 
+def test_local_device_resolution():
+    """ローカル翻訳のデバイス判定が cpu / cuda のいずれかを返すこと"""
+    device = resolve_local_device()
+    assert device in ("cpu", "cuda")
+    print(f"[OK] ローカル翻訳デバイス判定テスト成功 (device={device})")
+
+
 if __name__ == "__main__":
     test_parsers()
     test_cache_and_same_language_skip()
+    test_local_device_resolution()
     test_circuit_breaker()
     test_local_nllb_translator()
     test_translator_engine_switching()

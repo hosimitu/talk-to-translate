@@ -16,7 +16,12 @@ from src.config import (
     TRANSLATION_ENGINES,
 )
 from src.audio import AudioRecorder
-from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
+from src.transcriber import (
+    TranscriptionEngine,
+    detect_acceleration,
+    parse_language_code,
+    parse_model_size,
+)
 from src.processor import AudioProcessor
 from src.diarizer import SpeakerDiarizer
 from src.translator import (
@@ -465,7 +470,16 @@ class AppUI(ctk.CTk):
             font=ctk.CTkFont(size=12),
             text_color="gray",
         )
-        self.privacy_badge.grid(row=1, column=0, columnspan=3, padx=20, pady=(0, 10), sticky="w")
+        self.privacy_badge.grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 10), sticky="w")
+
+        # 文字起こしモデル／推論デバイス表示（GPU自動判定の結果を可視化）
+        self.model_badge = ctk.CTkLabel(
+            footer_frame,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+        )
+        self.model_badge.grid(row=1, column=2, padx=20, pady=(0, 10), sticky="e")
 
         # 初回起動時の通知バナー（モーダルにせず、その場で閉じられる）
         self.privacy_notice = ctk.CTkFrame(
@@ -497,6 +511,7 @@ class AppUI(ctk.CTk):
         ).grid(row=0, column=1, padx=12, pady=10, sticky="e")
 
         self._update_privacy_badge()
+        self._update_model_badge()
         self._refresh_privacy_notice()
 
     def _current_translation_engine_kind(self) -> str:
@@ -516,6 +531,21 @@ class AppUI(ctk.CTk):
                 text="🔒 ローカルのみ（外部送信なし）",
                 text_color="#28a745",
             )
+
+    def _update_model_badge(self):
+        """文字起こしモデルと推論デバイス（GPU/CPU）を表示する"""
+        model_name = parse_model_size(self.model_option.get())
+        if model_name == "sensevoice":
+            self.model_badge.configure(text="⚙ SenseVoice (CPU)", text_color="gray")
+            return
+
+        device = getattr(self.transcriber, "device", None)
+        if not device:
+            device, _ = detect_acceleration()
+        if device == "cuda":
+            self.model_badge.configure(text="⚙ Whisper (GPU)", text_color="#28a745")
+        else:
+            self.model_badge.configure(text="⚙ Whisper (CPU)", text_color="gray")
 
     def _refresh_privacy_notice(self):
         """同意済みなら通知バナーを隠す"""
@@ -716,6 +746,7 @@ class AppUI(ctk.CTk):
             "privacy_ack_version": self._get_privacy_ack_version(),
         }
         self.config_manager.save_config(current_settings)
+        self._update_model_badge()
 
     def _on_closing(self):
         """ウィンドウ終了時の処理"""
@@ -841,6 +872,7 @@ class AppUI(ctk.CTk):
                 self.model_option.configure(state="disabled")
                 self.input_lang_option.configure(state="disabled")
                 self.engine_option.configure(state="disabled")
+                self._update_model_badge()
 
             self.after(0, update_ui_on_success)
 

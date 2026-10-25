@@ -3,7 +3,12 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.transcriber import parse_language_code, parse_model_size, TranscriptionEngine
+from src.transcriber import (
+    detect_acceleration,
+    parse_language_code,
+    parse_model_size,
+    TranscriptionEngine,
+)
 from src.sensevoice_engine import normalize_language
 
 
@@ -29,6 +34,18 @@ def test_parsers():
     print("[OK] パース関数のテスト成功")
 
 
+def test_detect_acceleration():
+    """GPU/CPUの自動判定結果が整合していること"""
+    device, compute_type = detect_acceleration()
+    assert device in ("cpu", "cuda")
+    assert compute_type in ("int8", "float16")
+    if device == "cuda":
+        assert compute_type == "float16"
+    else:
+        assert compute_type == "int8"
+    print(f"[OK] 推論デバイス自動判定テスト成功 (device={device}, compute_type={compute_type})")
+
+
 def test_sensevoice_engine():
     print("SenseVoiceエンジンのテスト実行中...")
     engine = TranscriptionEngine(model_size="sensevoice")
@@ -49,6 +66,7 @@ def test_whisper_engine():
 
 if __name__ == "__main__":
     test_parsers()
+    test_detect_acceleration()
     test_sensevoice_engine()
     test_whisper_engine()
     print("すべての文字起こしエンジンテストが正常に通過しました！")

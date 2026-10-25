@@ -85,6 +85,16 @@ def detect_language(text: str) -> str:
     return "en"
 
 
+def resolve_local_device() -> str:
+    """CTranslate2 が利用可能なデバイスを返す（CUDA判定に失敗した場合はCPU）"""
+    try:
+        import ctranslate2
+
+        return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+    except Exception:
+        return "cpu"
+
+
 class LocalNLLBTranslator:
     """CTranslate2 と NLLB-200 (int8量子化) を用いたローカルAI翻訳エンジン"""
 
@@ -108,6 +118,7 @@ class LocalNLLBTranslator:
         self.checkpoints_dir = checkpoints_dir or default_checkpoint
         self.translator = None
         self.tokenizer = None
+        self.device = "cpu"
         self._is_loaded = False
 
     def load_model(self, progress_callback: Optional[Callable[[str], None]] = None):
@@ -128,9 +139,19 @@ class LocalNLLBTranslator:
 
         model_dir = snapshot_download(repo_id=self.repo_id, local_dir=self.checkpoints_dir)
 
-        # GPUが使える場合はCUDA、それ以外はCPUでint8高速推論
-        device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
-        self.translator = ctranslate2.Translator(model_dir, device=device)
+        # GPUが使える場合はCUDA、それ以外はCPUでint8高速推論。
+        # CUDAライブラリ不足などで初期化に失敗した場合はCPUへフォールバックする。
+        device = resolve_local_device()
+        try:
+            self.translator = ctranslate2.Translator(model_dir, device=device)
+        except Exception as e:
+            if device == "cpu":
+                raise
+            print(f"[LocalNLLBTranslator] CUDAの初期化に失敗したためCPUへフォールバックします: {e}")
+            device = "cpu"
+            self.translator = ctranslate2.Translator(model_dir, device="cpu")
+        self.device = device
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self._is_loaded = True
 
