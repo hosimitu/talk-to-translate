@@ -1,6 +1,8 @@
 """
 Talk-to-Translate 設定管理モジュール
-UIの各種設定（モデル、言語、マイク、音源分離等）をJSONファイルとして永続化・復元します。
+UIの各種設定（モデル、言語、マイク、話者識別等）をJSONファイルとして永続化・復元します。
+既定値と選択肢はこのモジュールを唯一の定義元とし、config.json は初回起動時に自動生成される
+ローカル設定ファイル（Git管理外）です。
 PyInstallerでEXE化された環境や管理者権限フォルダへの配置でも安全に動作するようフォールバック設計されています。
 """
 
@@ -10,14 +12,137 @@ import sys
 from typing import Any, Dict
 
 
+CONFIG_VERSION = 1
+
+# UIの選択肢（config.json の値域とデフォルト値の唯一の定義元）
+TRANSCRIPTION_MODELS = [
+    "SenseVoice-Small (超高速・日中英推奨)",
+    "Whisper: large-v3-turbo (高精度)",
+    "Whisper: small (軽量)",
+]
+
+TRANSLATION_ENGINES = [
+    "クラウド翻訳 (Google/MyMemory) (推奨)",
+    "ローカル翻訳 (NLLB 600M) (推奨)",
+    "ローカル翻訳 (NLLB 1.3B) (推奨)",
+    "ローカル翻訳 (NLLB 3.3B)",
+]
+
+INPUT_LANGUAGES = ["自動検出 (auto)", "日本語 (ja)", "英語 (en)", "中国語 (zh)"]
+
+TARGET_LANGUAGES = ["英語 (en)", "日本語 (ja)", "中国語 (zh)"]
+
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "transcription_model": "SenseVoice-Small (超高速・日中英推奨)",
-    "translation_engine": "クラウド翻訳 (Google/MyMemory) (推奨)",
-    "input_lang": "自動検出 (auto)",
-    "target_lang": "英語 (en)",
+    "config_version": CONFIG_VERSION,
+    "transcription_model": TRANSCRIPTION_MODELS[0],
+    "translation_engine": TRANSLATION_ENGINES[0],
+    "input_lang": INPUT_LANGUAGES[0],
+    "target_lang": TARGET_LANGUAGES[0],
     "enable_separation": False,
     "mic_device": "",
 }
+
+# 値の妥当性検証に使う選択肢一覧（DEFAULT_CONFIG がここに含まれることをテストで保証）
+CONFIG_SCHEMA: Dict[str, list] = {
+    "transcription_model": TRANSCRIPTION_MODELS,
+    "translation_engine": TRANSLATION_ENGINES,
+    "input_lang": INPUT_LANGUAGES,
+    "target_lang": TARGET_LANGUAGES,
+}
+
+
+def _as_text(value: Any) -> str:
+    """設定値を安全に文字列化する（文字列以外は空文字扱い）"""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def normalize_transcription_model(value: Any) -> str:
+    """文字起こしモデルの設定値を正規化（旧表記・部分一致にも対応）"""
+    text = _as_text(value)
+    if text in TRANSCRIPTION_MODELS:
+        return text
+
+    lowered = text.lower()
+    if "sensevoice" in lowered:
+        return TRANSCRIPTION_MODELS[0]
+    if "small" in lowered:
+        return TRANSCRIPTION_MODELS[2]
+    if "whisper" in lowered or "turbo" in lowered:
+        return TRANSCRIPTION_MODELS[1]
+    return DEFAULT_CONFIG["transcription_model"]
+
+
+def normalize_translation_engine(value: Any) -> str:
+    """翻訳エンジンの設定値を正規化（旧表記の「(推奨)」なし等に対応）"""
+    text = _as_text(value)
+    if text in TRANSLATION_ENGINES:
+        return text
+
+    if "ローカル" in text:
+        if "1.3B" in text:
+            return TRANSLATION_ENGINES[2]
+        if "3.3B" in text:
+            return TRANSLATION_ENGINES[3]
+        return TRANSLATION_ENGINES[1]
+    if "クラウド" in text or "cloud" in text.lower():
+        return TRANSLATION_ENGINES[0]
+    return DEFAULT_CONFIG["translation_engine"]
+
+
+def normalize_input_language(value: Any) -> str:
+    """入力言語の設定値を正規化（言語コードのみの旧表記にも対応）"""
+    text = _as_text(value)
+    if text in INPUT_LANGUAGES:
+        return text
+
+    if "ja" in text or "日本" in text:
+        return INPUT_LANGUAGES[1]
+    if "zh" in text or "中国" in text or "中文" in text:
+        return INPUT_LANGUAGES[3]
+    if "en" in text or "英語" in text:
+        return INPUT_LANGUAGES[2]
+    return DEFAULT_CONFIG["input_lang"]
+
+
+def normalize_target_language(value: Any) -> str:
+    """翻訳先言語の設定値を正規化（言語コードのみの旧表記にも対応）"""
+    text = _as_text(value)
+    if text in TARGET_LANGUAGES:
+        return text
+
+    if "ja" in text or "日本" in text:
+        return TARGET_LANGUAGES[1]
+    if "zh" in text or "中国" in text or "中文" in text:
+        return TARGET_LANGUAGES[2]
+    if "en" in text or "英語" in text:
+        return TARGET_LANGUAGES[0]
+    return DEFAULT_CONFIG["target_lang"]
+
+
+def normalize_config(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    読み込んだ設定を検証し、既定のキーだけを持つ正規化済みの辞書を返す。
+    不正値・旧形式の値はデフォルト値へ、未知のキーは破棄する。
+    """
+    if not isinstance(data, dict):
+        data = {}
+
+    config = DEFAULT_CONFIG.copy()
+    config["transcription_model"] = normalize_transcription_model(data.get("transcription_model"))
+    config["translation_engine"] = normalize_translation_engine(data.get("translation_engine"))
+    config["input_lang"] = normalize_input_language(data.get("input_lang"))
+    config["target_lang"] = normalize_target_language(data.get("target_lang"))
+
+    enable_separation = data.get("enable_separation")
+    if isinstance(enable_separation, bool):
+        config["enable_separation"] = enable_separation
+
+    mic_device = data.get("mic_device")
+    if isinstance(mic_device, str):
+        config["mic_device"] = mic_device
+
+    config["config_version"] = CONFIG_VERSION
+    return config
 
 
 class ConfigManager:
@@ -94,18 +219,18 @@ class ConfigManager:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    # 既存のデフォルト値にロードしたデータをマージ
-                    config.update(data)
+                    # 不正値・旧形式の値をデフォルトへ補正して返す
+                    config = normalize_config(data)
         except Exception as e:
             print(f"[ConfigManager] 設定ファイルの読み込みに失敗しました ({e})。デフォルト値を使用します。")
 
         return config
 
     def save_config(self, config_data: Dict[str, Any]) -> bool:
-        """設定データをJSONファイルへ保存する"""
+        """設定データをJSONファイルへ保存する（保存前に値域を検証）"""
         path = self.get_config_path()
-        data_to_save = DEFAULT_CONFIG.copy()
-        data_to_save.update(config_data)
+        # 未知のキーを落とし、不正値をデフォルトへ補正してから保存する
+        data_to_save = normalize_config(config_data)
 
         try:
             with open(path, "w", encoding="utf-8") as f:

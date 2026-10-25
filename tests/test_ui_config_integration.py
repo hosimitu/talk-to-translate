@@ -19,7 +19,7 @@ def test_ui_config_persistence():
         # 事前にカスタム設定を用意
         initial_settings = {
             "transcription_model": "Whisper: small (軽量)",
-            "translation_engine": "ローカル翻訳 (NLLB 1.3B)",
+            "translation_engine": "ローカル翻訳 (NLLB 1.3B) (推奨)",
             "input_lang": "日本語 (ja)",
             "target_lang": "中国語 (zh)",
             "enable_separation": True,
@@ -40,7 +40,7 @@ def test_ui_config_persistence():
 
             # UIの選択肢を手動で反映テスト
             app.model_option.set("Whisper: small (軽量)")
-            app.engine_option.set("ローカル翻訳 (NLLB 1.3B)")
+            app.engine_option.set("ローカル翻訳 (NLLB 1.3B) (推奨)")
             app.input_lang_option.set("日本語 (ja)")
             app.target_lang_option.set("中国語 (zh)")
             app.sep_checkbox.select()
@@ -51,7 +51,7 @@ def test_ui_config_persistence():
             # ファイルから再度読み出して検証
             loaded = manager.load_config()
             assert loaded["transcription_model"] == "Whisper: small (軽量)"
-            assert loaded["translation_engine"] == "ローカル翻訳 (NLLB 1.3B)"
+            assert loaded["translation_engine"] == "ローカル翻訳 (NLLB 1.3B) (推奨)"
             assert loaded["input_lang"] == "日本語 (ja)"
             assert loaded["target_lang"] == "中国語 (zh)"
             assert loaded["enable_separation"] is True

@@ -31,6 +31,7 @@
   - PCに接続されているマイク（入力デバイス）をアプリ内で自由に切り替え可能。
 - **設定の自動保存・復元（永続化）**:
   - 選択した文字起こしモデル、翻訳エンジン/モデル、入力言語、翻訳先言語、マイクデバイス、話者識別のON/OFFが自動保存（`config.json`）され、次回起動時に前回の設定が自動で復元されます。EXE実行時や管理者権限フォルダでも安全に動作します。
+  - `config.json` は初回起動時に自動生成されるローカル設定ファイルです（リポジトリや配布物には含まれません）。初期値は `src/config.py` の `DEFAULT_CONFIG` で一元管理されています。
 
 ---
 
@@ -142,7 +143,7 @@ pip install -r requirements.txt
 
 | 対象データ | 保存場所 (エクスプローラーのアドレスバーに入力) | 内容 |
 | :--- | :--- | :--- |
-| **設定ファイル・ログ** | `%APPDATA%\Talk-to-Translate` | 設定ファイル (`config.json`)、実行時ログ (`talk-to-translate.log`) ※存在する場合のみ |
+| **設定ファイル・ログ** | アプリのフォルダ直下（書き込み不可の場合は `%APPDATA%\Talk-to-Translate`） | 設定ファイル (`config.json`)、実行時ログ (`talk-to-translate.log`) ※存在する場合のみ |
 | **AIモデルキャッシュ** | `%USERPROFILE%\.cache\huggingface` | SenseVoice / Whisper / 3D-speaker等のダウンロード済みモデル |
 | **ローカル翻訳モデル** | アプリフォルダ内の `checkpoints\` | NLLB翻訳モデル（アプリフォルダ削除時に同時に削除されます） |
 

@@ -6,7 +6,14 @@ import tkinter as tk
 from typing import Optional
 import customtkinter as ctk
 import sounddevice as sd
-from src.config import ConfigManager
+from src.config import (
+    ConfigManager,
+    DEFAULT_CONFIG,
+    INPUT_LANGUAGES,
+    TARGET_LANGUAGES,
+    TRANSCRIPTION_MODELS,
+    TRANSLATION_ENGINES,
+)
 from src.audio import AudioRecorder
 from src.transcriber import TranscriptionEngine, parse_language_code, parse_model_size
 from src.processor import AudioProcessor
@@ -15,6 +22,7 @@ from src.translator import (
     TextTranslator,
     parse_target_language_code,
     parse_source_language_code,
+    parse_translation_engine,
 )
 from src.separator import SpeechSeparator
 
@@ -64,16 +72,11 @@ class AppUI(ctk.CTk):
 
         # 翻訳エンジンの初期化（保存された設定を反映）
         saved_engine = self.config.get("translation_engine", "")
-        is_local = "ローカル" in saved_engine
-        nllb_model = "nllb-600M"
-        if "1.3B" in saved_engine:
-            nllb_model = "nllb-1.3B"
-        elif "3.3B" in saved_engine:
-            nllb_model = "nllb-3.3B"
+        engine, nllb_model = parse_translation_engine(saved_engine)
 
         self.translator = TextTranslator(
             source_lang="auto",
-            engine="local" if is_local else "cloud",
+            engine=engine,
             nllb_model=nllb_model,
         )
 
@@ -177,11 +180,7 @@ class AppUI(ctk.CTk):
         model_label = ctk.CTkLabel(header_frame, text="AIモデル:", font=ctk.CTkFont(size=12, weight="bold"))
         model_label.grid(row=0, column=1, padx=10, pady=(10, 0), sticky="w")
         
-        models = [
-            "SenseVoice-Small (超高速・日中英推奨)",
-            "Whisper: large-v3-turbo (高精度)",
-            "Whisper: small (軽量)",
-        ]
+        models = TRANSCRIPTION_MODELS
         self.model_option = ctk.CTkOptionMenu(
             header_frame,
             values=models,
@@ -194,13 +193,13 @@ class AppUI(ctk.CTk):
         if saved_model in models:
             self.model_option.set(saved_model)
         else:
-            self.model_option.set("SenseVoice-Small (超高速・日中英推奨)")
+            self.model_option.set(DEFAULT_CONFIG["transcription_model"])
 
         # 3. 入力音声言語
         lang_label = ctk.CTkLabel(header_frame, text="入力言語 (音声):", font=ctk.CTkFont(size=12, weight="bold"))
         lang_label.grid(row=0, column=2, padx=10, pady=(10, 0), sticky="w")
         
-        languages = ["自動検出 (auto)", "日本語 (ja)", "英語 (en)", "中国語 (zh)"]
+        languages = INPUT_LANGUAGES
         self.input_lang_option = ctk.CTkOptionMenu(
             header_frame,
             values=languages,
@@ -213,13 +212,13 @@ class AppUI(ctk.CTk):
         if saved_input_lang in languages:
             self.input_lang_option.set(saved_input_lang)
         else:
-            self.input_lang_option.set("自動検出 (auto)")
+            self.input_lang_option.set(DEFAULT_CONFIG["input_lang"])
 
         # 4. 翻訳先言語
         trans_label = ctk.CTkLabel(header_frame, text="翻訳先言語:", font=ctk.CTkFont(size=12, weight="bold"))
         trans_label.grid(row=0, column=3, padx=10, pady=(10, 0), sticky="w")
         
-        target_languages = ["英語 (en)", "日本語 (ja)", "中国語 (zh)"]
+        target_languages = TARGET_LANGUAGES
         self.target_lang_option = ctk.CTkOptionMenu(
             header_frame,
             values=target_languages,
@@ -232,18 +231,13 @@ class AppUI(ctk.CTk):
         if saved_target_lang in target_languages:
             self.target_lang_option.set(saved_target_lang)
         else:
-            self.target_lang_option.set("英語 (en)")
+            self.target_lang_option.set(DEFAULT_CONFIG["target_lang"])
 
         # 5. 翻訳エンジン選択 (2行目の前半)
         engine_label = ctk.CTkLabel(header_frame, text="翻訳エンジン:", font=ctk.CTkFont(size=12, weight="bold"))
         engine_label.grid(row=2, column=0, padx=10, pady=(6, 12), sticky="w")
 
-        engines = [
-            "クラウド翻訳 (Google/MyMemory) (推奨)",
-            "ローカル翻訳 (NLLB 600M) (推奨)",
-            "ローカル翻訳 (NLLB 1.3B) (推奨)",
-            "ローカル翻訳 (NLLB 3.3B)",
-        ]
+        engines = TRANSLATION_ENGINES
         self.engine_option = ctk.CTkOptionMenu(
             header_frame,
             values=engines,
@@ -251,18 +245,12 @@ class AppUI(ctk.CTk):
         )
         self.engine_option.grid(row=2, column=1, padx=10, pady=(6, 12), sticky="ew")
 
-        # 保存されていた翻訳エンジンの復元
+        # 保存されていた翻訳エンジンの復元（旧表記は ConfigManager 側で正規化済み）
         saved_engine = self.config.get("translation_engine")
         if saved_engine in engines:
             self.engine_option.set(saved_engine)
-        elif saved_engine and "600M" in saved_engine:
-            self.engine_option.set("ローカル翻訳 (NLLB 600M) (推奨)")
-        elif saved_engine and "1.3B" in saved_engine:
-            self.engine_option.set("ローカル翻訳 (NLLB 1.3B) (推奨)")
-        elif saved_engine and "3.3B" in saved_engine:
-            self.engine_option.set("ローカル翻訳 (NLLB 3.3B)")
         else:
-            self.engine_option.set("クラウド翻訳 (Google/MyMemory) (推奨)")
+            self.engine_option.set(DEFAULT_CONFIG["translation_engine"])
 
         # 6. 話者識別（旧・音源分離）チェックボックス (2行目の後半に配置)
         self.sep_checkbox = ctk.CTkCheckBox(
@@ -597,13 +585,8 @@ class AppUI(ctk.CTk):
 
     def _on_change_engine(self, selected_engine: str):
         """翻訳エンジンの切替ハンドラ"""
-        if "ローカル" in selected_engine:
-            nllb_model = "nllb-600M"
-            if "1.3B" in selected_engine:
-                nllb_model = "nllb-1.3B"
-            elif "3.3B" in selected_engine:
-                nllb_model = "nllb-3.3B"
-
+        engine, nllb_model = parse_translation_engine(selected_engine)
+        if engine == "local":
             self.translator.set_nllb_model(nllb_model)
             self.translator.set_engine("local")
 

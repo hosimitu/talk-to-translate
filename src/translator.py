@@ -9,6 +9,30 @@ import re
 import time
 from typing import Callable, Optional
 from deep_translator import GoogleTranslator, MyMemoryTranslator
+from src.config import TRANSLATION_ENGINES
+
+# UIの選択肢（src/config.py）と NLLB モデルの対応表（クラウドは None）
+_NLLB_MODEL_BY_ENGINE_LABEL = dict(
+    zip(TRANSLATION_ENGINES, (None, "nllb-600M", "nllb-1.3B", "nllb-3.3B"))
+)
+
+
+def parse_translation_engine(ui_engine_text: str) -> tuple[str, str]:
+    """UIの翻訳エンジン選択肢から (エンジン種別, NLLBモデル名) を返す"""
+    if ui_engine_text in _NLLB_MODEL_BY_ENGINE_LABEL:
+        nllb_model = _NLLB_MODEL_BY_ENGINE_LABEL[ui_engine_text]
+        if nllb_model is None:
+            return "cloud", "nllb-600M"
+        return "local", nllb_model
+
+    # 旧表記・部分一致へのフォールバック
+    if "ローカル" in ui_engine_text:
+        if "1.3B" in ui_engine_text:
+            return "local", "nllb-1.3B"
+        if "3.3B" in ui_engine_text:
+            return "local", "nllb-3.3B"
+        return "local", "nllb-600M"
+    return "cloud", "nllb-600M"
 
 
 def parse_target_language_code(ui_language_text: str) -> str:

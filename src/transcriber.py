@@ -6,7 +6,14 @@ SenseVoice (ONNX) と faster-whisper の両方をシームレスに切り替え�
 from typing import Optional, Union
 import numpy as np
 from faster_whisper import WhisperModel
+from src.config import TRANSCRIPTION_MODELS
 from src.sensevoice_engine import SenseVoiceEngine
+
+
+# UIの選択肢（src/config.py）と内部モデル名の対応表
+_MODEL_SIZE_BY_LABEL = dict(
+    zip(TRANSCRIPTION_MODELS, ("sensevoice", "large-v3-turbo", "small"))
+)
 
 
 def parse_language_code(ui_language_text: str) -> Optional[str]:
@@ -22,9 +29,14 @@ def parse_language_code(ui_language_text: str) -> Optional[str]:
 
 def parse_model_size(ui_model_text: str) -> str:
     """UIのモデル選択肢文字列から内部モデル名へ変換"""
-    if "SenseVoice" in ui_model_text or "sensevoice" in ui_model_text.lower():
+    if ui_model_text in _MODEL_SIZE_BY_LABEL:
+        return _MODEL_SIZE_BY_LABEL[ui_model_text]
+
+    # 旧表記・部分一致へのフォールバック
+    lowered = str(ui_model_text).lower()
+    if "sensevoice" in lowered:
         return "sensevoice"
-    elif "small" in ui_model_text.lower():
+    elif "small" in lowered:
         return "small"
     return "large-v3-turbo"
 
