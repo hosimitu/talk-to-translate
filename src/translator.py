@@ -109,6 +109,9 @@ class LocalNLLBTranslator:
         "en": "eng_Latn",
         "zh-CN": "zho_Hans",
         "zh": "zho_Hans",
+        # SenseVoice は韓国語・広東語も認識するが、欠けていると英語として扱われてしまう
+        "ko": "kor_Hang",
+        "yue": "zho_Hant",
     }
 
     def __init__(self, model_name: str = "nllb-600M", checkpoints_dir: Optional[str] = None):
@@ -274,6 +277,8 @@ class TextTranslator:
             "ja": "ja-JP",
             "en": "en-US",
             "zh-CN": "zh-CN",
+            "ko": "ko-KR",
+            "yue": "zh-TW",
             "auto": "ja-JP",
         }
         return mapping.get(lang, lang)

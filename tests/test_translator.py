@@ -146,6 +146,18 @@ def test_cache_and_same_language_skip():
     print("[OK] 同一言語スキップ・翻訳キャッシュのテスト成功")
 
 
+def test_language_maps_for_ko_yue():
+    """SenseVoiceが認識する韓国語・広東語が翻訳マップに登録されていること"""
+    assert LocalNLLBTranslator.NLLB_LANG_CODES["ko"] == "kor_Hang"
+    assert LocalNLLBTranslator.NLLB_LANG_CODES["yue"] == "zho_Hant"
+
+    translator = TextTranslator(engine="cloud")
+    assert translator._get_mymemory_lang("ko") == "ko-KR"
+    assert translator._get_mymemory_lang("yue") == "zh-TW"
+    assert translator._get_mymemory_lang("ja") == "ja-JP"
+    print("[OK] 韓国語・広東語の翻訳マップテスト成功")
+
+
 def test_local_device_resolution():
     """ローカル翻訳のデバイス判定が cpu / cuda のいずれかを返すこと"""
     device = resolve_local_device()
@@ -156,6 +168,7 @@ def test_local_device_resolution():
 if __name__ == "__main__":
     test_parsers()
     test_cache_and_same_language_skip()
+    test_language_maps_for_ko_yue()
     test_local_device_resolution()
     test_circuit_breaker()
     test_local_nllb_translator()

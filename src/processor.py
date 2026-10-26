@@ -3,6 +3,7 @@ Talk-to-Translate 音声処理ワーカーモジュール
 発話と無音を検出し、必要に応じて話者識別（3D-speaker ONNX）を行い、文字起こしを実行します。
 """
 
+import re
 import threading
 import time
 from typing import Callable, Optional
@@ -13,12 +14,18 @@ from src.transcriber import TranscriptionEngine
 from src.diarizer import SpeakerDiarizer
 
 
-def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: float = 6.0) -> np.ndarray:
+def preprocess_audio(
+    audio: np.ndarray,
+    target_peak: float = 0.9,
+    max_gain: float = 6.0,
+    gain: Optional[float] = None,
+) -> np.ndarray:
     """
     音声波形の前処理（DCオフセット除去＆自動音量ノーマライズ）
     :param audio: 音声信号 (float32)
     :param target_peak: 目標とするピーク音量 (0.0〜1.0)
     :param max_gain: 最大増幅率
+    :param gain: 増幅率の明示指定（Noneの場合は target_peak/max_gain から算出）
     :return: 前処理済みの音声信号
     """
     if len(audio) == 0:
@@ -29,9 +36,31 @@ def preprocess_audio(audio: np.ndarray, target_peak: float = 0.9, max_gain: floa
     if peak < 1e-4:
         return audio
 
-    gain = min(target_peak / peak, max_gain)
+    if gain is None:
+        gain = min(target_peak / peak, max_gain)
     normalized = audio * gain
     return np.clip(normalized, -1.0, 1.0)
+
+
+def compute_boost_gain(peak: float, noise_floor: float, target_peak: float = 0.9, max_gain: float = 6.0) -> float:
+    """
+    ノイズフロアとの差（SNR）に応じてブースト率を制限する。
+
+    無音近い短いセグメントでも最大6倍に増幅すると背景ノイズが「発話」として
+    増幅され、認識モデルのハルシネーション（幻の文字起こし）を生む。
+    """
+    if peak <= 0 or peak < 1e-4:
+        return 1.0
+
+    gain = min(target_peak / peak, max_gain)
+
+    snr_margin = peak - noise_floor
+    if snr_margin < 0.004:
+        # ピーク自体がノイズフロアと区別できない場合: ほぼ増幅しない
+        gain = min(gain, 1.2)
+    elif snr_margin < 0.010:
+        gain = min(gain, 2.0)
+    return gain
 
 
 def compute_effective_threshold(silence_threshold: float, noise_floor: float) -> float:
@@ -42,6 +71,16 @@ def compute_effective_threshold(silence_threshold: float, noise_floor: float) ->
     騒がしい環境でノイズフロアが上がっても閾値が追従できず、無音を検出できなくなる。
     """
     return max(0.003, min(silence_threshold * 3.0, noise_floor * 2.5))
+
+
+def format_elapsed_time(seconds: float) -> str:
+    """録音開始からの経過秒を MM:SS（1時間以上は H:MM:SS）形式で表示する"""
+    total = int(max(0, seconds))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:02d}:{sec:02d}"
 
 
 class AudioProcessor:
@@ -57,6 +96,8 @@ class AudioProcessor:
         silence_duration_sec: float = 0.8,
         min_speech_duration_sec: float = 0.3,
         max_speech_duration_sec: float = 8.0,
+        split_overlap_sec: float = 0.4,
+        pre_buffer_sec: float = 0.3,
         on_activity_callback: Optional[Callable[[float, bool], None]] = None,
     ):
         """
@@ -69,6 +110,8 @@ class AudioProcessor:
         :param silence_duration_sec: 発話終了とみなす無音継続時間 (秒)
         :param min_speech_duration_sec: 処理対象とする最小発話時間 (秒、短文相槌に対応)
         :param max_speech_duration_sec: 1回の処理に含める最大発話時間 (秒)
+        :param split_overlap_sec: 最長発話分割時に入力を確実にするため次の区間へ引き継ぐ時間 (秒)
+        :param pre_buffer_sec: 発話検知前にさかのぼって保持する時間 (秒、語頭の欠け防止)
         :param on_activity_callback: 音声レベルおよび発話状態更新コールバック (rms: float, is_active: bool)
         """
         self.recorder = recorder
@@ -82,12 +125,15 @@ class AudioProcessor:
         self.silence_duration_sec = silence_duration_sec
         self.min_speech_duration_sec = min_speech_duration_sec
         self.max_speech_duration_sec = max_speech_duration_sec
+        self.split_overlap_sec = split_overlap_sec
+        self.pre_buffer_sec = pre_buffer_sec
         self.noise_floor = 0.002  # バックグラウンド環境音の初期推定値
 
         self._thread: Optional[threading.Thread] = None
         self._is_running = False
         self._language: Optional[str] = None
         self._last_dropped_chunks = 0
+        self._recording_started_at: Optional[float] = None  # 発話タイムスタンプの基準時刻
 
     @property
     def is_running(self) -> bool:
@@ -101,6 +147,7 @@ class AudioProcessor:
         self._is_running = True
         self._language = language
         self._last_dropped_chunks = 0
+        self._recording_started_at = time.monotonic()
         self._thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._thread.start()
 
@@ -126,7 +173,8 @@ class AudioProcessor:
 
         speech_buffer: list[np.ndarray] = []
         pre_buffer: list[np.ndarray] = []
-        max_pre_buffer_chunks = 3
+        # pre_buffer の保持量は「秒」基準（チャンク長はデバイス依存のため、最初のチャンクで換算する）
+        max_pre_buffer_chunks: Optional[int] = None
 
         is_speaking = False
         silence_start_time: Optional[float] = None
@@ -136,6 +184,11 @@ class AudioProcessor:
             chunk_time, chunk = self._next_chunk()
             if chunk is None or len(chunk) == 0:
                 continue
+
+            if max_pre_buffer_chunks is None and sample_rate > 0:
+                chunk_sec = len(chunk) / float(sample_rate)
+                if chunk_sec > 0:
+                    max_pre_buffer_chunks = max(1, int(round(self.pre_buffer_sec / chunk_sec)))
 
             # 推論が追いつかず音声が破棄された場合は、50チャンクごとに通知
             dropped = getattr(self.recorder, "dropped_chunks", 0)
@@ -184,27 +237,44 @@ class AudioProcessor:
                     if silence_start_time is None:
                         silence_start_time = now
                     elif now - silence_start_time >= self.silence_duration_sec:
-                        self._process_speech(speech_buffer, sample_rate)
+                        self._process_speech(speech_buffer, sample_rate, speech_start_time)
                         speech_buffer.clear()
                         is_speaking = False
                         silence_start_time = None
                         speech_start_time = None
                 else:
                     pre_buffer.append(chunk)
-                    if len(pre_buffer) > max_pre_buffer_chunks:
+                    if max_pre_buffer_chunks is not None and len(pre_buffer) > max_pre_buffer_chunks:
                         pre_buffer.pop(0)
 
             if is_speaking and speech_start_time and (now - speech_start_time >= self.max_speech_duration_sec):
-                self._process_speech(speech_buffer, sample_rate)
-                speech_buffer.clear()
-                is_speaking = False
+                # 最長発話時間に到達したら分割する。話者は話し続けている可能性が高いため
+                # 発話状態はリセットせず、末尾 split_overlap_sec を次の区間へ引き継ぐ
+                # （文の切れ目で認識が途切れても語尾を復元できる）。
+                overlap_samples = int(round(self.split_overlap_sec * sample_rate))
+                kept_samples = 0
+                tail: list[np.ndarray] = []
+                while speech_buffer and kept_samples < overlap_samples:
+                    tail_chunk = speech_buffer.pop()
+                    tail.append(tail_chunk)
+                    kept_samples += len(tail_chunk)
+                tail.reverse()
+
+                head = speech_buffer
+                self._process_speech(head, sample_rate, speech_start_time)
+                speech_buffer = tail
                 silence_start_time = None
-                speech_start_time = None
+                speech_start_time = now
 
         if speech_buffer:
-            self._process_speech(speech_buffer, sample_rate)
+            self._process_speech(speech_buffer, sample_rate, speech_start_time)
 
-    def _process_speech(self, buffer: list[np.ndarray], sample_rate: int):
+    def _process_speech(
+        self,
+        buffer: list[np.ndarray],
+        sample_rate: int,
+        speech_start_time: Optional[float] = None,
+    ):
         """蓄積された発話音声を処理（話者識別ONなら[話者N]タグを付与、OFFなら直接文字起こし）"""
         if not buffer:
             return
@@ -215,8 +285,12 @@ class AudioProcessor:
         if duration_sec < self.min_speech_duration_sec:
             return
 
-        # 1. 音量自動ノーマライズ
-        audio_data = preprocess_audio(raw_audio, target_peak=0.9, max_gain=6.0)
+        # 1. 音量ブースト（ノイズフロアとの差に応じて増幅率を制限し、
+        #    無音に近い短いセグメントが過剰増幅されてハルシネーションを起こすのを防ぐ）
+        centered = raw_audio - np.mean(raw_audio)
+        peak = float(np.max(np.abs(centered)))
+        boost_gain = compute_boost_gain(peak, self.noise_floor)
+        audio_data = preprocess_audio(raw_audio, gain=boost_gain)
 
         # 2. 話者識別（ダイアライザーが有効な場合）
         speaker_tag = ""
@@ -232,7 +306,12 @@ class AudioProcessor:
         try:
             text = self.transcriber.transcribe(audio_data, language=self._language)
             if text and text.strip():
-                final_text = f"{speaker_tag}{text.strip()}"
+                # 録音開始からの相対時刻を接頭辞として付与（議事録等で利用）
+                timestamp_prefix = ""
+                if speech_start_time is not None and self._recording_started_at is not None:
+                    elapsed = max(0.0, speech_start_time - self._recording_started_at)
+                    timestamp_prefix = f"[{format_elapsed_time(elapsed)}] "
+                final_text = f"{timestamp_prefix}{speaker_tag}{text.strip()}"
                 self.on_transcription_callback(final_text)
         except Exception as e:
             print(f"[AudioProcessor Error] 文字起こし処理失敗: {e}")

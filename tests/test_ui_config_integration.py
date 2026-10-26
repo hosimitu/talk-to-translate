@@ -153,6 +153,21 @@ def test_p1_translation_pipeline_and_privacy():
             assert app._translation_generation == generation_before + 1
             assert app.translation_queue.empty()
 
+            # 7. 発話の時刻接頭辞は翻訳からは除去される（原文表示には時刻付きで残る）
+            app.transcribe_textbox.delete("1.0", tk.END)
+            app._translation_buffer.clear()
+            app.transcription_queue.put(("[00:30] [話者1] こんにちは", "ja"))
+            app._on_transcription_received("[00:30] [話者1] こんにちは")
+            with app._buffer_lock:
+                assert app._translation_buffer == ["[話者1] こんにちは"]
+            # 原文側の時刻表示は transcription_queue 経由の表示でも保持されている
+            app._drain_transcription_queue()
+            assert "[00:30] [話者1] こんにちは" in app.transcribe_textbox.get("1.0", tk.END)
+            # H:MM:SS 形式も同様に除去できる（話者が交代したため先のバッファはフラッシュされる）
+            app._on_transcription_received("[1:02:03] 続けて")
+            with app._buffer_lock:
+                assert app._translation_buffer == ["続けて"]
+
             print("[OK] 翻訳パイプライン・プライバシー表示テスト成功")
         finally:
             app.destroy()

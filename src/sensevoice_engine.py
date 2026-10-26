@@ -4,6 +4,7 @@ sherpa-onnx を使用して SenseVoice-Small (ONNX int8) による超低遅延�
 """
 
 import re
+from collections import OrderedDict
 from typing import Optional
 import huggingface_hub
 import numpy as np
@@ -51,11 +52,28 @@ class SenseVoiceEngine:
         self.num_threads = num_threads
         self.recognizer: Optional[sherpa_onnx.OfflineRecognizer] = None
         self._current_language = "auto"
+        # 言語ごとに認識器をキャッシュする（言語切替のたびの再構築・遅延を防ぐ）。
+        # モデルファイルは共有なので、認識器オブジェクト自体は軽量。
+        self._recognizers: "OrderedDict[str, sherpa_onnx.OfflineRecognizer]" = OrderedDict()
         # 直近の発話から検出された言語（翻訳側のソース言語推定に利用）
         self.last_detected_language: Optional[str] = None
         self._load_model(self._current_language)
 
-    def _load_model(self, language: str):
+    MAX_CACHED_RECOGNIZERS = 2
+
+    def _get_recognizer(self, language: str) -> sherpa_onnx.OfflineRecognizer:
+        """指定言語の認識器を取得する（未構築なら構築し、上限超過分はLRUで破棄）"""
+        if language in self._recognizers:
+            self._recognizers.move_to_end(language)
+            return self._recognizers[language]
+
+        recognizer = self._build_recognizer(language)
+        self._recognizers[language] = recognizer
+        while len(self._recognizers) > self.MAX_CACHED_RECOGNIZERS:
+            self._recognizers.popitem(last=False)
+        return recognizer
+
+    def _build_recognizer(self, language: str) -> sherpa_onnx.OfflineRecognizer:
         """HuggingFace Hub からモデルを取得し sherpa-onnx でロード"""
         model_path = huggingface_hub.hf_hub_download(
             repo_id=self.REPO_ID,
@@ -66,13 +84,17 @@ class SenseVoiceEngine:
             filename=self.TOKENS_FILENAME,
         )
 
-        self.recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+        return sherpa_onnx.OfflineRecognizer.from_sense_voice(
             model=model_path,
             tokens=tokens_path,
             num_threads=self.num_threads,
             use_itn=True,
             language=language if language != "auto" else "auto",
         )
+
+    def _load_model(self, language: str):
+        """下位互換用ラッパ（指定言語の認識器を構築して current に設定する）"""
+        self.recognizer = self._get_recognizer(language)
         self._current_language = language
 
     def transcribe(self, audio_data: np.ndarray, language: Optional[str] = None) -> str:
@@ -83,16 +105,17 @@ class SenseVoiceEngine:
         :return: 整形済み文字起こしテキスト
         """
         target_lang = language if language else "auto"
-        if self.recognizer is None or self._current_language != target_lang:
-            self._load_model(target_lang)
+        recognizer = self._get_recognizer(target_lang)
+        self.recognizer = recognizer
+        self._current_language = target_lang
 
-        if self.recognizer is None or len(audio_data) == 0:
+        if len(audio_data) == 0:
             return ""
 
-        stream = self.recognizer.create_stream()
+        stream = recognizer.create_stream()
         # 16000Hzモノラルで波形を渡す
         stream.accept_waveform(16000, audio_data)
-        self.recognizer.decode_stream(stream)
+        recognizer.decode_stream(stream)
         raw_text = stream.result.text.strip()
 
         # 感情・イベントタグ (<|ja|><|NEUTRAL|><|Speech|> 等) より前に言語を取得

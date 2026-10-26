@@ -31,6 +31,9 @@ from src.translator import (
     parse_translation_engine,
 )
 
+# 発話の相対時刻接頭辞（"[MM:SS] " / "[H:MM:SS] "）。翻訳へは時刻を含めず送るため除去に使う
+_TIMESTAMP_PREFIX_PATTERN = re.compile(r"^\[\d{1,3}:\d{2}(?::\d{2})?\]\s+")
+
 # テーマ設定
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -577,6 +580,11 @@ class AppUI(ctk.CTk):
         self.transcription_queue.put((text, detected_lang))
 
         stripped = text.strip()
+        if not stripped:
+            return
+
+        # 翻訳バッファには時刻接頭辞を含めない（原文表示側の transcription_queue には時刻付きで載る）
+        stripped = _TIMESTAMP_PREFIX_PATTERN.sub("", stripped).strip()
         if not stripped:
             return
 

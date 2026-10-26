@@ -1,5 +1,7 @@
 """音声前処理モジュールの単体テストスクリプト"""
 
+import time
+
 import numpy as np
 from src.processor import preprocess_audio, compute_effective_threshold
 
@@ -37,6 +39,42 @@ def test_effective_threshold_adaptation():
     # 極端に大きいノイズフロアでも上限を超えない
     assert abs(compute_effective_threshold(0.006, 1.0) - 0.018) < 1e-9
     print("[OK] VAD有効閾値の環境適応テスト成功")
+
+
+def test_compute_boost_gain():
+    """ノイズフロアとの差（SNR余裕）に応じた増幅率の制限"""
+    from src.processor import compute_boost_gain
+
+    # 明瞭な音声（フロアと十分差がある）: 通常の正規化レート
+    assert compute_boost_gain(0.5, 0.001) < 2.0
+
+    # フロアと区別できない小さなピーク: ほぼ増幅しない
+    assert compute_boost_gain(0.002, 0.0015) <= 1.2
+
+    # わずかに浮いているだけの中間: 中間の上限
+    gain = compute_boost_gain(0.010, 0.004)
+    assert 1.2 < gain <= 2.0
+
+    # フロアを大きく超える小音量: 音量正規化どおりに増幅する
+    assert compute_boost_gain(0.02, 0.001) > 2.0
+
+    # ほぼ無音・ゼロ: 増幅しない
+    assert compute_boost_gain(0.00005, 0.001) == 1.0
+    assert compute_boost_gain(0.0, 0.001) == 1.0
+    print("[OK] 音量ブースト制限テスト成功")
+
+
+def test_format_elapsed_time():
+    """経過秒の表示形式 (MM:SS / H:MM:SS)"""
+    from src.processor import format_elapsed_time
+
+    assert format_elapsed_time(0) == "00:00"
+    assert format_elapsed_time(5) == "00:05"
+    assert format_elapsed_time(65) == "01:05"
+    assert format_elapsed_time(600) == "10:00"
+    assert format_elapsed_time(3671) == "1:01:11"
+    assert format_elapsed_time(-1.5) == "00:00"
+    print("[OK] 経過時間フォーマットテスト成功")
 
 
 def test_resample_audio():
@@ -190,14 +228,146 @@ def test_audio_processor_vad_and_short_speech():
     assert len(results) == 1
     assert results[0] == "はい"
     print(f"[OK] 短文発話(0.4秒)の正常処理確認: '{results[0]}'")
+class _FakeRecorder:
+    """チャンク (取得時刻, 音声) のリストをキューから返すだけの簡易レコーダー"""
+
+    sample_rate = 16000
+    dropped_chunks = 0
+
+    def __init__(self, items):
+        self._items = list(items)
+
+    def get_chunk_with_timestamp(self, timeout=0.1):
+        if not self._items:
+            import time as _time
+            _time.sleep(0.01)  # チャンク切れ時のスピン待機を軽減
+            return None, None
+        return self._items.pop(0)
+
+
+def _run_worker_loop(processor, wait_sec=1.0):
+    """_worker_loop をスレッドで実行し、全チャンク消化後に停止する"""
+    import threading
+
+    thread = threading.Thread(target=processor._worker_loop, daemon=True)
+    thread.start()
+    time.sleep(wait_sec)
+    processor._is_running = False
+    thread.join(timeout=2.0)
+
+
+def _build_processor(items, mock_transcriber):
+    """_worker_loop を直接走らせるためのプロセッサを構築する"""
+    from src.processor import AudioProcessor
+
+    results = []
+    processor = AudioProcessor(
+        recorder=_FakeRecorder(items),
+        transcriber=mock_transcriber,
+        on_transcription_callback=results.append,
+    )
+    processor._is_running = True
+    return processor, results
+
+
+def test_split_overlap_and_timestamps():
+    """8秒分割で末尾がオーバーラップし、発話に時刻接頭辞が付くこと"""
+    from unittest.mock import MagicMock
+    import re as _re
+    from src.processor import AudioProcessor
+
+    sr = 16000
+    silence = np.zeros(16000, dtype=np.float32)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, 16000)) * 0.1).astype(np.float32)
+
+    items = []
+    for t in range(2):                       # 無音 2秒 (t=0, 1)
+        items.append((float(t), silence.copy()))
+    for t in range(2, 22):                   # 発話 20秒 (t=2〜21)
+        items.append((float(t), speech.copy()))
+    for t in range(22, 25):                  # 途中無音 (発話終了判定)
+        items.append((float(t), silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "こんにちは"
+    segments = []
+    original = mock_transcriber.transcribe
+    mock_transcriber.transcribe = lambda audio, language=None: (
+        segments.append(audio.copy()) or original(audio, language=language)
+    )
+
+    results = []
+    processor = AudioProcessor(
+        recorder=_FakeRecorder(items),
+        transcriber=mock_transcriber,
+        on_transcription_callback=results.append,
+    )
+    processor._is_running = True
+    processor._recording_started_at = 0.0  # start() 相当
+    _run_worker_loop(processor)
+
+    # 20秒の発話 → 最低2回に分割される
+    assert len(segments) >= 2
+    # 先頭区間: 発話前に構えた pre_buffer 1チャンク（無音 t=1）+ 発話 t=2〜9 の 9チャンク
+    assert len(segments[0]) == int(9.0 * sr)
+    # 以降の区間も最大発話時間＋オーバーラップ分を超えない
+    for seg in segments[1:]:
+        assert len(seg) <= int((8.0 + 0.5) * sr)
+    # 分割部は削除ではなく引き継ぎのため、区間のつながりで音声が欠けていない
+    # （2区間目の先頭は前区間末尾の直後のチャンク＝発話波形そのもの。ブースト×6済み）
+    assert np.allclose(segments[1][:sr], speech * 6.0, atol=1e-5)
+    # 時刻接頭辞: 最初の発話は t=2.0 から → "[00:02] " で始まる
+    assert results[0].startswith("[00:02] こんにちは")
+    assert all(_re.match(r"^\[\d{1,3}:\d{2}(?::\d{2})?\] ", text) for text in results)
+    print(f"[OK] 8秒分割オーバーラップとタイムスタンプのテスト成功: {len(segments)}区間")
+
+
+def test_pre_buffer_seconds_based():
+    """発話前バッファが「秒」基準で保持されること（チャンク長がデバイス依存でも）
+
+    `0.5秒チャンクのデバイスでは、旧実装（固定3チャンク）では1.5秒もさかのぼる一方、
+    チャンク長が長い場合は語頭欠け防止に必要なのは pre_buffer_sec(0.3秒) 分。
+    0.3秒分が保持されるなら 1 チャンク丸ごと（0.5秒）が残る。
+    """
+    from unittest.mock import MagicMock
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "こんにちは"
+    sr = 16000
+    chunk_len = int(sr * 0.5)
+    silence = np.zeros(chunk_len, dtype=np.float32)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, chunk_len)) * 0.1).astype(np.float32)
+
+    items = []
+    for i in range(4):                       # 無音 4チャンク (t=0〜1.5)
+        items.append((i * 0.5, silence.copy()))
+    items.append((2.0, speech.copy()))       # 発話 (t=2.0)
+    items.append((2.5, speech.copy()))       # 発話 (t=2.5)
+    items.append((3.0, silence.copy()))      # 発話終了判定開始
+    items.append((4.0, silence.copy()))      # 1秒無音で確定
+
+    processor, results = _build_processor(items, mock_transcriber)
+    _run_worker_loop(processor)
+
+    assert len(processor.transcriber.transcribe.call_args_list) == 1
+    audio = processor.transcriber.transcribe.call_args_list[0][0][0]
+    # 保持チャンク: pre_buffer 0.3秒→1チャンク + 発話2 + 終了判定用無音2 = 5チャンク (2.5秒)
+    assert len(audio) == chunk_len * 5
+    # 冒頭に発話前 0.3 秒以上（実装では1チャンク=0.5秒）が含まれている
+    assert len(results) == 1
+    print(f"[OK] 秒基準の発話前バッファのテスト成功 (長さ {len(audio)} サンプル = {len(audio)/sr:.1f}秒)")
 
 
 if __name__ == "__main__":
     test_preprocess_audio()
     test_effective_threshold_adaptation()
+    test_compute_boost_gain()
+    test_format_elapsed_time()
     test_resample_audio()
     test_input_sample_rate_fallback()
     test_audio_queue_is_bounded()
+    test_split_overlap_and_timestamps()
+    test_pre_buffer_seconds_based()
     test_audio_processor_diarization()
     test_audio_processor_vad_and_short_speech()
     print("すべての音声前処理・プロセッサテストが正常に通過しました！")
