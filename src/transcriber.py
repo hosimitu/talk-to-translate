@@ -9,9 +9,18 @@ from faster_whisper import WhisperModel
 from src.config import TRANSCRIPTION_MODELS
 from src.sensevoice_engine import (
     SenseVoiceEngine,
+    is_meaningful_transcription,
     normalize_language,
     recommend_cpu_threads,
 )
+
+
+# Whisper のハルシネーション判定しきい値。
+# 反復暴走した出力は compression_ratio が跳ね上がり、雑音への誤変換は avg_logprob が下がる。
+_MAX_COMPRESSION_RATIO = 2.4
+_LOW_LOGPROB = -1.0
+_LOW_LOGPROB_NO_SPEECH = 0.35
+_MAX_NO_SPEECH_PROB = 0.6
 
 
 # UIの選択肢（src/config.py）と内部モデル名の対応表
@@ -189,6 +198,32 @@ class TranscriptionEngine:
         texts = [
             segment.text.strip()
             for segment in segments
-            if segment.text.strip() and segment.no_speech_prob < 0.6
+            if self._is_reliable_segment(segment)
         ]
-        return " ".join(texts)
+        merged = " ".join(texts)
+
+        # 無音・雑音への幻覚で句読点だけが残ることがあるため、語を含まない出力は捨てる
+        if not is_meaningful_transcription(merged):
+            return ""
+        return merged
+
+    @staticmethod
+    def _is_reliable_segment(segment) -> bool:
+        """
+        Whisper のセグメントが信頼できる発話かを判定する。
+
+        無音・雑音に対する幻覚（同一フレーズの反復や低確信度の誤変換）を除外する。
+        """
+        text = (getattr(segment, "text", "") or "").strip()
+        if not text:
+            return False
+        if getattr(segment, "no_speech_prob", 0.0) >= _MAX_NO_SPEECH_PROB:
+            return False
+        if getattr(segment, "compression_ratio", 0.0) > _MAX_COMPRESSION_RATIO:
+            return False
+        if (
+            getattr(segment, "avg_logprob", 0.0) < _LOW_LOGPROB
+            and getattr(segment, "no_speech_prob", 0.0) > _LOW_LOGPROB_NO_SPEECH
+        ):
+            return False
+        return True

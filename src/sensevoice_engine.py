@@ -22,6 +22,9 @@ _LANGUAGE_CODE_MAP = {
     "yue": "yue",
 }
 
+# 語を構成する文字（英数字・かな・漢字・ハングル等）。アンダースコアは語とみなさない。
+_MEANINGFUL_TEXT_PATTERN = re.compile(r"[^\W_]", re.UNICODE)
+
 # 推論スレッド数の既定上限。実測では16スレッド指定より8スレッドの方が高速だった
 # （スレッド競合により 8スレッド 179ms に対し 16スレッド 208ms）。
 DEFAULT_MAX_INFERENCE_THREADS = 8
@@ -38,6 +41,18 @@ def recommend_cpu_threads(max_threads: int = DEFAULT_MAX_INFERENCE_THREADS) -> i
     if cpu_count <= 2:
         return 1
     return max(2, min(max_threads, cpu_count // 2))
+
+
+def is_meaningful_transcription(text: object) -> bool:
+    """
+    文字起こし結果が語を構成する文字を含むかを判定する。
+
+    SenseVoice / Whisper は非発話音や環境音に対して "。" や "..." のような
+    句読点・記号だけを出力することがある。これを弾いて無意味な表示や翻訳を防ぐ。
+    """
+    if not isinstance(text, str):
+        return False
+    return _MEANINGFUL_TEXT_PATTERN.search(text) is not None
 
 
 def normalize_language(value: object) -> Optional[str]:
@@ -150,4 +165,8 @@ class SenseVoiceEngine:
 
         # SenseVoiceの感情・イベントタグを除去
         clean_text = re.sub(r"<\|.*?\|>", "", raw_text).strip()
+
+        # 非発話音では "。" や "." など記号だけを返すことがあるため、語を含まない出力は捨てる
+        if not is_meaningful_transcription(clean_text):
+            return ""
         return clean_text
