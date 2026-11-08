@@ -322,6 +322,122 @@ def test_split_overlap_and_timestamps():
     print(f"[OK] 8秒分割オーバーラップとタイムスタンプのテスト成功: {len(segments)}区間")
 
 
+def test_transient_noise_is_rejected():
+    """単発ノイズ（実発話が最小発話時間未満）では推論を呼ばず破棄すること
+
+    発話前バッファ(0.3秒)と末尾の無音待機(0.8秒)により区間長は1.1秒を超えてしまう。
+    実際に有音だったのは1チャンク(26ms)だけなので、区間長ではなく有音時間で
+    判定しないと、打鍵音・咳払いのたびに推論が走ってしまう。
+    """
+    from unittest.mock import MagicMock
+
+    chunk_len = 416  # 実測した PortAudio の1チャンク（約26ms）
+    chunk_sec = chunk_len / 16000
+    silence = np.zeros(chunk_len, dtype=np.float32)
+    click = (np.sin(np.linspace(0, 2 * np.pi * 1000, chunk_len)) * 0.5).astype(np.float32)
+
+    items = []
+    # 事前の無音（pre_buffer 0.3秒 以上）
+    for i in range(12):
+        items.append((i * chunk_sec, silence.copy()))
+    # 打鍵音などの単発ノイズ1チャンクのみ
+    items.append((12 * chunk_sec, click.copy()))
+    # 末尾の無音待機（silence_duration_sec = 0.8秒 を超えるまで）
+    for i in range(13, 60):
+        items.append((i * chunk_sec, silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "幻の文字起こし"
+    processor, results = _build_processor(items, mock_transcriber)
+    _run_worker_loop(processor, wait_sec=1.5)
+
+    # 推論が一度も呼ばれないこと（=CPU を使わない）
+    assert mock_transcriber.transcribe.call_count == 0, (
+        f"単発ノイズで推論が走りました: {mock_transcriber.transcribe.call_count} 回"
+    )
+    assert results == []
+    print("[OK] 単発ノイズの棄却（推論呼び出し0回）テスト成功")
+
+
+def test_short_acknowledgement_is_kept():
+    """短い相槌（0.4秒）は有音時間が閾値以上なので認識されること"""
+    from unittest.mock import MagicMock
+
+    chunk_len = 416
+    chunk_sec = chunk_len / 16000
+    silence = np.zeros(chunk_len, dtype=np.float32)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 300, chunk_len)) * 0.1).astype(np.float32)
+
+    items = []
+    for i in range(12):
+        items.append((i * chunk_sec, silence.copy()))
+    # 0.4秒分（約15チャンク）の有音
+    for i in range(12, 27):
+        items.append((i * chunk_sec, speech.copy()))
+    for i in range(27, 60):
+        items.append((i * chunk_sec, silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "はい"
+    processor, results = _build_processor(items, mock_transcriber)
+    _run_worker_loop(processor, wait_sec=1.5)
+
+    assert mock_transcriber.transcribe.call_count == 1
+    assert len(results) == 1 and "はい" in results[0]
+    print(f"[OK] 短い相槌(0.4秒)の認識継続テスト成功: '{results[0]}'")
+
+
+def test_soft_split_on_short_pause():
+    """一定時間話した後の短い息継ぎで区切られ、8秒を待たないこと
+
+    無音 0.5 秒は silence_duration_sec(0.8秒) 未満なので、ソフトスプリットが
+    無ければ区間は確定しない。soft_split_duration_sec(5.0秒) を超えて話した後の
+    息継ぎでは確定することを確かめる。
+    """
+    from unittest.mock import MagicMock
+
+    sr = 16000
+    silence = np.zeros(sr, dtype=np.float32)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, sr)) * 0.1).astype(np.float32)
+
+    items = []
+    # 発話 6秒 (t=0〜5) — soft_split_duration_sec(5.0秒) を超える
+    for t in range(6):
+        items.append((float(t), speech.copy()))
+    # 0.25秒の息継ぎを3つ (t=6.0, 6.25, 6.5) — 合計0.5秒は0.8秒未満
+    quarter = sr // 4
+    for i, t in enumerate((6.0, 6.25, 6.5)):
+        items.append((t, np.zeros(quarter, dtype=np.float32)))
+    # 以降は無音を続ける
+    for t in (7.0, 8.0, 9.0):
+        items.append((t, silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "こんにちは"
+    segments = []
+    original = mock_transcriber.transcribe
+
+    def record(audio, language=None):
+        segments.append(audio.copy())
+        return original(audio, language=language)
+
+    mock_transcriber.transcribe = record
+
+    processor, results = _build_processor(items, mock_transcriber)
+    processor._recording_started_at = 0.0
+    _run_worker_loop(processor, wait_sec=1.5)
+
+    # 8秒のハードスプリットを待たず、息継ぎの時点で区間が確定している
+    assert len(segments) >= 1, "ソフトスプリットで区間が確定しませんでした"
+    assert len(results) >= 1
+    # 最初の区間はハードスプリットの8秒より明確に短い
+    assert len(segments[0]) < int(7.0 * sr)
+    print(
+        f"[OK] 息継ぎによるソフトスプリットのテスト成功: "
+        f"{len(segments)}区間 / 先頭 {len(segments[0])/sr:.2f}秒"
+    )
+
+
 def test_pre_buffer_seconds_based():
     """発話前バッファが「秒」基準で保持されること（チャンク長がデバイス依存でも）
 
@@ -368,6 +484,9 @@ if __name__ == "__main__":
     test_audio_queue_is_bounded()
     test_split_overlap_and_timestamps()
     test_pre_buffer_seconds_based()
+    test_transient_noise_is_rejected()
+    test_short_acknowledgement_is_kept()
+    test_soft_split_on_short_pause()
     test_audio_processor_diarization()
     test_audio_processor_vad_and_short_speech()
     print("すべての音声前処理・プロセッサテストが正常に通過しました！")

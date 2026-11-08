@@ -7,7 +7,20 @@ from typing import Optional
 import numpy as np
 from faster_whisper import WhisperModel
 from src.config import TRANSCRIPTION_MODELS
-from src.sensevoice_engine import SenseVoiceEngine, normalize_language
+from src.sensevoice_engine import (
+    SenseVoiceEngine,
+    is_meaningful_transcription,
+    normalize_language,
+    recommend_cpu_threads,
+)
+
+
+# Whisper のハルシネーション判定しきい値。
+# 反復暴走した出力は compression_ratio が跳ね上がり、雑音への誤変換は avg_logprob が下がる。
+_MAX_COMPRESSION_RATIO = 2.4
+_LOW_LOGPROB = -1.0
+_LOW_LOGPROB_NO_SPEECH = 0.35
+_MAX_NO_SPEECH_PROB = 0.6
 
 
 # UIの選択肢（src/config.py）と内部モデル名の対応表
@@ -66,18 +79,25 @@ class TranscriptionEngine:
         model_size: str = "sensevoice",
         device: Optional[str] = None,
         compute_type: Optional[str] = None,
+        cpu_threads: Optional[int] = None,
     ):
         """
         初期化
         :param model_size: "sensevoice", "large-v3-turbo", "small"
         :param device: "cpu" / "cuda"（未指定時はGPUを自動判定）
         :param compute_type: "int8" / "float16"（未指定時はdeviceに応じて自動選択）
+        :param cpu_threads: CPU推論スレッド数（NoneでCPUコア数から自動決定）
         """
         default_device, default_compute_type = detect_acceleration()
         self.model_size = model_size
         self.device = device or default_device
         self.compute_type = compute_type or (
             default_compute_type if self.device == "cuda" else "int8"
+        )
+        self.cpu_threads = (
+            cpu_threads
+            if isinstance(cpu_threads, int) and cpu_threads > 0
+            else recommend_cpu_threads()
         )
 
         # 直近の文字起こしで検出された言語（翻訳側のソース言語推定に利用）
@@ -102,6 +122,7 @@ class TranscriptionEngine:
                         self.model_size,
                         device=self.device,
                         compute_type=self.compute_type,
+                        cpu_threads=self.cpu_threads,
                     )
                 except Exception as e:
                     if self.device == "cpu":
@@ -116,6 +137,7 @@ class TranscriptionEngine:
                         self.model_size,
                         device="cpu",
                         compute_type="int8",
+                        cpu_threads=self.cpu_threads,
                     )
 
     def change_model(self, model_size: str):
@@ -153,13 +175,20 @@ class TranscriptionEngine:
         # Whisper側の二重VADフィルタ（vad_filter=True）は無効化（高速化・短文誤カット防止・アセット依存解消）
         # チャンクごとの独立推論を行い、プロンプト・前文起因のハルシネーション（繰り返しループ）を防ぐため
         # condition_on_previous_text=False を指定
+        #
+        # 追加の最適化:
+        # - 発話単位の時刻は AudioProcessor が付与するため、チャンク内タイムスタンプの
+        #   デコード（without_timestamps=False）は不要。無効化してデコード手数を減らす。
+        # - CPU では貪欲法（beam_size=1）でメモリ帯域とレイテンシを抑え、GPU では精度優先で 3 を使う。
+        is_cpu = self.device != "cuda"
         segments, info = self.whisper_model.transcribe(
             audio_data,
             language=language,
             condition_on_previous_text=False,
             vad_filter=False,
-            beam_size=3,
+            beam_size=1 if is_cpu else 3,
             temperature=0.0,
+            without_timestamps=True,
         )
 
         detected = normalize_language(getattr(info, "language", None))
@@ -169,6 +198,32 @@ class TranscriptionEngine:
         texts = [
             segment.text.strip()
             for segment in segments
-            if segment.text.strip() and segment.no_speech_prob < 0.6
+            if self._is_reliable_segment(segment)
         ]
-        return " ".join(texts)
+        merged = " ".join(texts)
+
+        # 無音・雑音への幻覚で句読点だけが残ることがあるため、語を含まない出力は捨てる
+        if not is_meaningful_transcription(merged):
+            return ""
+        return merged
+
+    @staticmethod
+    def _is_reliable_segment(segment) -> bool:
+        """
+        Whisper のセグメントが信頼できる発話かを判定する。
+
+        無音・雑音に対する幻覚（同一フレーズの反復や低確信度の誤変換）を除外する。
+        """
+        text = (getattr(segment, "text", "") or "").strip()
+        if not text:
+            return False
+        if getattr(segment, "no_speech_prob", 0.0) >= _MAX_NO_SPEECH_PROB:
+            return False
+        if getattr(segment, "compression_ratio", 0.0) > _MAX_COMPRESSION_RATIO:
+            return False
+        if (
+            getattr(segment, "avg_logprob", 0.0) < _LOW_LOGPROB
+            and getattr(segment, "no_speech_prob", 0.0) > _LOW_LOGPROB_NO_SPEECH
+        ):
+            return False
+        return True
