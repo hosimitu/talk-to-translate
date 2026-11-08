@@ -14,6 +14,13 @@ from src.transcriber import TranscriptionEngine
 from src.diarizer import SpeakerDiarizer
 
 
+def apply_normalization(centered: np.ndarray, gain: float) -> np.ndarray:
+    """DCオフセット除去済みの波形へ増幅率を適用し、クリップする"""
+    if len(centered) == 0:
+        return centered
+    return np.clip(centered * gain, -1.0, 1.0)
+
+
 def preprocess_audio(
     audio: np.ndarray,
     target_peak: float = 0.9,
@@ -31,15 +38,14 @@ def preprocess_audio(
     if len(audio) == 0:
         return audio
 
-    audio = audio - np.mean(audio)
-    peak = float(np.max(np.abs(audio)))
+    centered = audio - np.mean(audio)
+    peak = float(np.max(np.abs(centered)))
     if peak < 1e-4:
-        return audio
+        return centered
 
     if gain is None:
         gain = min(target_peak / peak, max_gain)
-    normalized = audio * gain
-    return np.clip(normalized, -1.0, 1.0)
+    return apply_normalization(centered, gain)
 
 
 def compute_boost_gain(peak: float, noise_floor: float, target_peak: float = 0.9, max_gain: float = 6.0) -> float:
@@ -98,6 +104,8 @@ class AudioProcessor:
         max_speech_duration_sec: float = 8.0,
         split_overlap_sec: float = 0.4,
         pre_buffer_sec: float = 0.3,
+        soft_split_duration_sec: float = 5.0,
+        soft_split_silence_sec: float = 0.35,
         on_activity_callback: Optional[Callable[[float, bool], None]] = None,
     ):
         """
@@ -112,6 +120,8 @@ class AudioProcessor:
         :param max_speech_duration_sec: 1回の処理に含める最大発話時間 (秒)
         :param split_overlap_sec: 最長発話分割時に入力を確実にするため次の区間へ引き継ぐ時間 (秒)
         :param pre_buffer_sec: 発話検知前にさかのぼって保持する時間 (秒、語頭の欠け防止)
+        :param soft_split_duration_sec: この時間を超えた発話は短い息継ぎでも区切る (秒)
+        :param soft_split_silence_sec: ソフトスプリットを発動する無音継続時間 (秒)
         :param on_activity_callback: 音声レベルおよび発話状態更新コールバック (rms: float, is_active: bool)
         """
         self.recorder = recorder
@@ -127,6 +137,8 @@ class AudioProcessor:
         self.max_speech_duration_sec = max_speech_duration_sec
         self.split_overlap_sec = split_overlap_sec
         self.pre_buffer_sec = pre_buffer_sec
+        self.soft_split_duration_sec = soft_split_duration_sec
+        self.soft_split_silence_sec = soft_split_silence_sec
         self.noise_floor = 0.002  # バックグラウンド環境音の初期推定値
 
         self._thread: Optional[threading.Thread] = None
@@ -179,6 +191,9 @@ class AudioProcessor:
         is_speaking = False
         silence_start_time: Optional[float] = None
         speech_start_time: Optional[float] = None
+        # 実際に有音だったサンプル数。発話前バッファや末尾の無音待機で水増しされた
+        # 区間長ではなく「本当に声があった時間」で最小発話時間を判定するために数える。
+        voiced_samples = 0
 
         while self._is_running:
             chunk_time, chunk = self._next_chunk()
@@ -228,20 +243,34 @@ class AudioProcessor:
                 if not is_speaking:
                     is_speaking = True
                     speech_start_time = now
+                    voiced_samples = 0
                     speech_buffer.extend(pre_buffer)
                     pre_buffer.clear()
                 speech_buffer.append(chunk)
+                voiced_samples += len(chunk)
             else:
                 if is_speaking:
                     speech_buffer.append(chunk)
                     if silence_start_time is None:
                         silence_start_time = now
-                    elif now - silence_start_time >= self.silence_duration_sec:
-                        self._process_speech(speech_buffer, sample_rate, speech_start_time)
+
+                    silence_elapsed = now - silence_start_time
+                    speech_elapsed = (now - speech_start_time) if speech_start_time is not None else 0.0
+                    # 一定時間話した後の短い息継ぎは、文節の区切りとして自然に確定させる。
+                    # 息継ぎが無ければ max_speech_duration_sec まで待って分割する。
+                    is_soft_split = (
+                        speech_elapsed >= self.soft_split_duration_sec
+                        and silence_elapsed >= self.soft_split_silence_sec
+                    )
+                    if is_soft_split or silence_elapsed >= self.silence_duration_sec:
+                        self._finalize_segment(
+                            speech_buffer, sample_rate, speech_start_time, voiced_samples
+                        )
                         speech_buffer.clear()
                         is_speaking = False
                         silence_start_time = None
                         speech_start_time = None
+                        voiced_samples = 0
                 else:
                     pre_buffer.append(chunk)
                     if max_pre_buffer_chunks is not None and len(pre_buffer) > max_pre_buffer_chunks:
@@ -261,36 +290,71 @@ class AudioProcessor:
                 tail.reverse()
 
                 head = speech_buffer
-                self._process_speech(head, sample_rate, speech_start_time)
+                # ハードスプリット時点では発話は継続中なので、最小発話時間の判定は行わない
+                # （voiced_samples=None を渡して長さによる棄却をスキップさせる）
+                self._process_speech(head, sample_rate, speech_start_time, voiced_samples=None)
                 speech_buffer = tail
                 silence_start_time = None
                 speech_start_time = now
+                voiced_samples = sum(len(c) for c in tail)
 
         if speech_buffer:
-            self._process_speech(speech_buffer, sample_rate, speech_start_time)
+            self._finalize_segment(
+                speech_buffer, sample_rate, speech_start_time, voiced_samples
+            )
+
+    def _finalize_segment(
+        self,
+        buffer: list[np.ndarray],
+        sample_rate: int,
+        speech_start_time: Optional[float],
+        voiced_samples: int,
+    ):
+        """
+        無音継続で終了した発話区間を確定する。
+
+        実際に有音だった時間が min_speech_duration_sec 未満なら、打鍵音・咳払いなどの
+        単発ノイズとみなして推論を行わず破棄する（発話前バッファと末尾無音で
+        区間長が水増しされるため、区間長ではなく有音時間で判定する）。
+        """
+        if not buffer:
+            return
+        if sample_rate > 0 and voiced_samples / float(sample_rate) < self.min_speech_duration_sec:
+            return
+        self._process_speech(buffer, sample_rate, speech_start_time, voiced_samples=voiced_samples)
 
     def _process_speech(
         self,
         buffer: list[np.ndarray],
         sample_rate: int,
         speech_start_time: Optional[float] = None,
+        voiced_samples: Optional[int] = None,
     ):
-        """蓄積された発話音声を処理（話者識別ONなら[話者N]タグを付与、OFFなら直接文字起こし）"""
+        """
+        蓄積された発話音声を処理（話者識別ONなら[話者N]タグを付与、OFFなら直接文字起こし）
+
+        :param voiced_samples: 実際に有音だったサンプル数。None のときは従来通り区間長で判定する
+            （最長発話の分割時や、テストからの直接呼び出しとの互換のため）。
+        """
         if not buffer:
             return
 
         raw_audio = np.concatenate(buffer)
-        duration_sec = len(raw_audio) / sample_rate
 
-        if duration_sec < self.min_speech_duration_sec:
+        if voiced_samples is None:
+            # 呼び出し元が有音時間を渡さない場合は区間長で判定する（後方互換）
+            if sample_rate > 0 and len(raw_audio) / sample_rate < self.min_speech_duration_sec:
+                return
+        elif sample_rate > 0 and voiced_samples / float(sample_rate) < self.min_speech_duration_sec:
             return
 
         # 1. 音量ブースト（ノイズフロアとの差に応じて増幅率を制限し、
         #    無音に近い短いセグメントが過剰増幅されてハルシネーションを起こすのを防ぐ）
+        #    DCオフセット除去は1度だけ行い、正規化も同じ配列を再利用する。
         centered = raw_audio - np.mean(raw_audio)
         peak = float(np.max(np.abs(centered)))
         boost_gain = compute_boost_gain(peak, self.noise_floor)
-        audio_data = preprocess_audio(raw_audio, gain=boost_gain)
+        audio_data = apply_normalization(centered, boost_gain)
 
         # 2. 話者識別（ダイアライザーが有効な場合）
         speaker_tag = ""
