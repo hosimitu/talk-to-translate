@@ -46,7 +46,9 @@ class AudioRecorder:
     """マイクからの音声入力を取得・バッファリングするクラス"""
 
     # 推論が追いつかない場合に保持する最大チャンク数（古いものから破棄）
-    MAX_QUEUED_CHUNKS = 256
+    # 16kHz では1チャンク約26msのため、512チャンクで約13秒分の余裕を確保する。
+    # 低スペックPCで推論が一時的に遅れても音声が欠落しにくい。
+    MAX_QUEUED_CHUNKS = 512
 
     def __init__(self, sample_rate: int = 16000, channels: int = 1):
         """

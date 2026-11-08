@@ -3,6 +3,7 @@ Talk-to-Translate SenseVoice 音声認識モジュール
 sherpa-onnx を使用して SenseVoice-Small (ONNX int8) による超低遅延・高精度な文字起こしを提供します。
 """
 
+import os
 import re
 from collections import OrderedDict
 from typing import Optional
@@ -20,6 +21,23 @@ _LANGUAGE_CODE_MAP = {
     "ko": "ko",
     "yue": "yue",
 }
+
+# 推論スレッド数の既定上限。実測では16スレッド指定より8スレッドの方が高速だった
+# （スレッド競合により 8スレッド 179ms に対し 16スレッド 208ms）。
+DEFAULT_MAX_INFERENCE_THREADS = 8
+
+
+def recommend_cpu_threads(max_threads: int = DEFAULT_MAX_INFERENCE_THREADS) -> int:
+    """
+    CPU論理コア数から推論スレッド数の推奨値を求める。
+
+    録音コールバックとUIスレッドをブロックしないよう全コアは使わず、
+    論理コア数の半分（2コア以下では1）を上限 max_threads で頭打ちにする。
+    """
+    cpu_count = os.cpu_count() or 2
+    if cpu_count <= 2:
+        return 1
+    return max(2, min(max_threads, cpu_count // 2))
 
 
 def normalize_language(value: object) -> Optional[str]:
@@ -44,12 +62,16 @@ class SenseVoiceEngine:
     MODEL_FILENAME = "model.int8.onnx"
     TOKENS_FILENAME = "tokens.txt"
 
-    def __init__(self, num_threads: int = 2):
+    def __init__(self, num_threads: Optional[int] = None):
         """
         初期化（モデルファイルのキャッシュ確認またはダウンロード）
-        :param num_threads: CPU推論スレッド数
+        :param num_threads: CPU推論スレッド数（NoneでCPUコア数から自動決定）
         """
-        self.num_threads = num_threads
+        self.num_threads = (
+            num_threads
+            if isinstance(num_threads, int) and num_threads > 0
+            else recommend_cpu_threads()
+        )
         self.recognizer: Optional[sherpa_onnx.OfflineRecognizer] = None
         self._current_language = "auto"
         # 言語ごとに認識器をキャッシュする（言語切替のたびの再構築・遅延を防ぐ）。
