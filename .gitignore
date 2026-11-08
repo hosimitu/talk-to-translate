@@ -53,4 +53,7 @@ checkpoints/
 # Agent / AI Assistant
 .agents/
 
+# Local analysis reports (not tracked)
+docs/
+
 
