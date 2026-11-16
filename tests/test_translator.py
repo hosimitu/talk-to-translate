@@ -158,6 +158,73 @@ def test_language_maps_for_ko_yue():
     print("[OK] 韓国語・広東語の翻訳マップテスト成功")
 
 
+def test_mymemory_uses_https():
+    """Google 制限時の MyMemory フォールバックが平文 http で送信しないこと"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from deep_translator.constants import BASE_URLS
+    from src.translator import MYMEMORY_HTTPS_BASE_URL, _ensure_mymemory_https
+
+    # 依存パッケージの既定値（http://）を HTTPS に上書きしている
+    assert MYMEMORY_HTTPS_BASE_URL.startswith("https://")
+    assert BASE_URLS["MYMEMORY"] == MYMEMORY_HTTPS_BASE_URL
+
+    # HTTPS 以外は拒否する
+    _ensure_mymemory_https(SimpleNamespace(_base_url=MYMEMORY_HTTPS_BASE_URL))
+    try:
+        _ensure_mymemory_https(
+            SimpleNamespace(_base_url="http://api.mymemory.translated.net/get")
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("http の MyMemory エンドポイントを拒否していない")
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"responseData": {"translatedText": "HELLO"}, "matches": []}
+
+        def close(self):
+            pass
+
+    def run_fallback(translator):
+        """Google をレート制限で失敗させ、MyMemory フォールバックを1回実行する"""
+        sent = []
+
+        def fake_get(url, **kwargs):
+            sent.append((url, kwargs.get("params")))
+            return FakeResponse()
+
+        with patch("src.translator.GoogleTranslator") as google_cls, patch(
+            "deep_translator.mymemory.requests.get", side_effect=fake_get
+        ):
+            google_cls.return_value.translate.side_effect = RuntimeError("429")
+            result = translator._translate_cloud(
+                "こんにちは", target_lang="en", source_lang="ja"
+            )
+        return result, sent
+
+    translator = TextTranslator(engine="cloud")
+
+    # 通常時: 実際に使われる URL が HTTPS である
+    result, sent = run_fallback(translator)
+    assert result == "HELLO"
+    assert len(sent) == 1
+    url, params = sent[0]
+    assert url == MYMEMORY_HTTPS_BASE_URL
+    assert params["langpair"] == "ja-JP|en-US"
+    assert params["q"] == "こんにちは"
+
+    # 依存パッケージが http に戻っても、http 送信は行わず翻訳不可に倒す
+    with patch.dict(BASE_URLS, {"MYMEMORY": "http://api.mymemory.translated.net/get"}):
+        result, sent = run_fallback(translator)
+    assert result.startswith("[翻訳不可")
+    assert sent == []
+    print("[OK] MyMemoryフォールバックのHTTPS強制テスト成功")
+
+
 def test_local_device_resolution():
     """ローカル翻訳のデバイス判定が cpu / cuda のいずれかを返すこと"""
     device = resolve_local_device()
@@ -169,6 +236,7 @@ if __name__ == "__main__":
     test_parsers()
     test_cache_and_same_language_skip()
     test_language_maps_for_ko_yue()
+    test_mymemory_uses_https()
     test_local_device_resolution()
     test_circuit_breaker()
     test_local_nllb_translator()
