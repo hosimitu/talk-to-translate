@@ -57,7 +57,13 @@ def extract_embedding_window(
     cumulative = np.concatenate(([0.0], np.cumsum(squared)))
 
     last_start = len(audio_data) - max_samples
-    for start in range(0, last_start + 1, hop_samples):
+    # hop の倍数だけを候補にすると、末尾が hop の倍数でない長さの音声で
+    # 末尾を含む窓が評価されず、末尾の有音を取りこぼす。末尾揃えの候補も必ず加える。
+    starts = list(range(0, last_start + 1, hop_samples))
+    if starts[-1] != last_start:
+        starts.append(last_start)
+
+    for start in starts:
         energy = cumulative[start + max_samples] - cumulative[start]
         if energy > best_energy:
             best_energy = energy
