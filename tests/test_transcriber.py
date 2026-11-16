@@ -154,11 +154,146 @@ def test_whisper_segment_filter():
     print("[OK] Whisperハルシネーション除外のテスト成功")
 
 
+def test_whisper_transcribe_integration():
+    """transcribe() のセグメント除外→結合→空文字化の統合経路を実モデルなしで検証する"""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    audio = np.zeros(1600, dtype=np.float32)
+
+    def segment(text="", no_speech_prob=0.05, compression_ratio=1.2, avg_logprob=-0.2):
+        return SimpleNamespace(
+            text=text,
+            no_speech_prob=no_speech_prob,
+            compression_ratio=compression_ratio,
+            avg_logprob=avg_logprob,
+        )
+
+    def run(
+        segments,
+        language="ja",
+        device="cpu",
+        audio_data=None,
+        detected_language="ja",
+    ):
+        """WhisperModel をスタブに差し替え、transcribe() を1回実行する"""
+        captured = {}
+
+        class StubWhisperModel:
+            def __init__(self, model_size, **kwargs):
+                captured["model_size"] = model_size
+                captured["init_kwargs"] = kwargs
+
+            def transcribe(self, waveform, **kwargs):
+                captured["audio"] = waveform
+                captured["transcribe_kwargs"] = kwargs
+                return iter(segments), SimpleNamespace(language=detected_language)
+
+        acceleration = ("cuda", "float16") if device == "cuda" else ("cpu", "int8")
+        with patch("src.transcriber.WhisperModel", StubWhisperModel), patch(
+            "src.transcriber.detect_acceleration", return_value=acceleration
+        ):
+            engine = TranscriptionEngine(model_size="small", device=device)
+            text = engine.transcribe(
+                audio if audio_data is None else audio_data, language=language
+            )
+        return text, engine, captured
+
+    # 全セグメントが除外されたら空文字（幻覚の本文がそのまま返らない）
+    text, engine, _ = run(
+        [
+            segment("ご視聴ありがとうございました", no_speech_prob=0.9),
+            segment("   "),
+            segment("ああああああ", compression_ratio=3.8),
+            segment("ん", no_speech_prob=0.5, avg_logprob=-1.5),
+        ]
+    )
+    assert text == ""
+    assert engine.last_detected_language == "ja"
+
+    # 信頼できるセグメントだけを strip して半角スペースで結合する
+    text, engine, _ = run(
+        [
+            segment(" こんにちは "),
+            segment("ご視聴ありがとうございました", no_speech_prob=0.95),
+            segment("世界"),
+        ]
+    )
+    assert text == "こんにちは 世界"
+    assert engine.last_detected_language == "ja"
+
+    # セグメント単位では通っても、結合結果が記号だけなら空文字にする
+    text, _, _ = run([segment("。"), segment("...")])
+    assert text == ""
+
+    # しきい値の境界（0.6 は除外 / 2.4 は残す / -1.0 は残す）
+    text, _, _ = run(
+        [
+            segment("境界0", no_speech_prob=0.6),
+            segment("境界1", compression_ratio=2.4),
+            segment("境界2", compression_ratio=2.41),
+            segment("境界3", avg_logprob=-1.0, no_speech_prob=0.5),
+            segment("境界4", avg_logprob=-1.01, no_speech_prob=0.5),
+            segment("境界5", avg_logprob=-1.01, no_speech_prob=0.35),
+        ]
+    )
+    assert text == "境界1 境界3 境界5"
+
+    # 属性が欠けたセグメントは既定値で判定する（text が無い/None は除外）
+    text, _, _ = run(
+        [
+            SimpleNamespace(text="属性あり"),
+            SimpleNamespace(text=None),
+            SimpleNamespace(),
+        ]
+    )
+    assert text == "属性あり"
+
+    # セグメントが1件も無い場合も空文字
+    text, _, _ = run([])
+    assert text == ""
+
+    # CPU ではビームサーチを広げず、タイムスタンプも要求しない
+    text, _, captured = run([segment("はい")])
+    assert text == "はい"
+    assert captured["model_size"] == "small"
+    assert captured["audio"] is audio
+    assert captured["init_kwargs"]["device"] == "cpu"
+    assert captured["init_kwargs"]["compute_type"] == "int8"
+    assert isinstance(captured["init_kwargs"]["cpu_threads"], int)
+    kwargs = captured["transcribe_kwargs"]
+    assert kwargs["language"] == "ja"
+    assert kwargs["beam_size"] == 1
+    assert kwargs["without_timestamps"] is True
+    assert kwargs["vad_filter"] is False
+    assert kwargs["condition_on_previous_text"] is False
+    assert kwargs["temperature"] == 0.0
+
+    # GPU では精度優先でビームサーチを3に広げる
+    _, _, captured = run([segment("hello")], language="en", device="cuda")
+    assert captured["init_kwargs"]["compute_type"] == "float16"
+    assert captured["transcribe_kwargs"]["beam_size"] == 3
+    assert captured["transcribe_kwargs"]["language"] == "en"
+
+    # 空音声はモデルを呼ばずに即返す
+    text, _, captured = run(
+        [segment("呼ばれない")], audio_data=np.array([], dtype=np.float32)
+    )
+    assert text == ""
+    assert "transcribe_kwargs" not in captured
+
+    # 言語が取得できない場合は直前の検出結果を保持する
+    _, engine, _ = run([segment("hello")], detected_language=None)
+    assert engine.last_detected_language is None
+    print("[OK] Whisper transcribe 統合経路のテスト成功")
+
+
 if __name__ == "__main__":
     test_parsers()
     test_recommend_cpu_threads()
     test_is_meaningful_transcription()
     test_whisper_segment_filter()
+    test_whisper_transcribe_integration()
     test_detect_acceleration()
     test_sensevoice_engine()
     test_whisper_engine()
