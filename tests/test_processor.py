@@ -41,6 +41,18 @@ def test_effective_threshold_adaptation():
     print("[OK] VAD有効閾値の環境適応テスト成功")
 
 
+def test_voiced_threshold_boundary():
+    """RMS が有効閾値と同値なら無音扱い（閾値を上回る場合だけ有音）"""
+    from src.processor import compute_effective_threshold, is_voiced_chunk
+
+    threshold = compute_effective_threshold(0.006, 0.002)
+    assert abs(threshold - 0.005) < 1e-12
+    assert is_voiced_chunk(threshold, threshold) is False
+    assert is_voiced_chunk(threshold + 1e-6, threshold) is True
+    assert is_voiced_chunk(threshold - 1e-6, threshold) is False
+    print("[OK] 有音判定の閾値境界テスト成功")
+
+
 def test_compute_boost_gain():
     """ノイズフロアとの差（SNR余裕）に応じた増幅率の制限"""
     from src.processor import compute_boost_gain
@@ -387,6 +399,100 @@ def test_short_acknowledgement_is_kept():
     print(f"[OK] 短い相槌(0.4秒)の認識継続テスト成功: '{results[0]}'")
 
 
+def test_finalize_segment_min_duration_boundary():
+    """最小発話時間ちょうどは通過し、1サンプルでも下回れば棄却されること"""
+    from unittest.mock import MagicMock
+    from src.processor import AudioProcessor
+    from src.audio import AudioRecorder
+
+    sr = 16000
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "はい"
+    results = []
+    processor = AudioProcessor(
+        recorder=AudioRecorder(sample_rate=sr),
+        transcriber=mock_transcriber,
+        on_transcription_callback=results.append,
+        min_speech_duration_sec=0.3,
+    )
+    buffer = [np.full(1600, 0.1, dtype=np.float32)]
+
+    # 0.3秒ちょうどは通過する
+    processor._finalize_segment(buffer, sr, 0.0, voiced_samples=int(0.3 * sr))
+    assert mock_transcriber.transcribe.call_count == 1
+    assert results == ["はい"]
+
+    # 1サンプル下回れば棄却する
+    processor._finalize_segment(buffer, sr, 0.0, voiced_samples=int(0.3 * sr) - 1)
+    assert mock_transcriber.transcribe.call_count == 1
+    assert results == ["はい"]
+    print("[OK] 最小発話時間の境界テスト成功")
+
+
+def test_hard_split_tail_ignores_silence():
+    """8秒分割の引き継ぎで、末尾の無音を有音時間に数えないこと
+
+    分割直後の区間は有音0.1秒しかない。引き継ぎ区間長0.4秒を有音扱いすると
+    最小発話時間を誤って満たしてしまう。
+    """
+    from unittest.mock import MagicMock
+
+    sr = 16000
+    chunk_len = int(sr * 0.1)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, chunk_len)) * 0.1).astype(np.float32)
+    silence = np.zeros(chunk_len, dtype=np.float32)
+
+    items = []
+    # 0.0〜7.7秒は発話。8.0秒到達でハードスプリットする
+    # （本番同様に 0 以外の時刻から開始する。speech_start_time=0.0 は分割判定で偽扱いになるため）
+    base = 100.0
+    for i in range(78):
+        items.append((base + i * 0.1, speech.copy()))
+    # 7.8秒以降は無音（分割時に引き継ぐ末尾0.4秒へ無音が混ざる）
+    for i in range(78, 90):
+        items.append((base + i * 0.1, silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "こんにちは"
+    processor, results = _build_processor(items, mock_transcriber)
+    _run_worker_loop(processor, wait_sec=1.5)
+
+    # 先頭区間だけが推論され、有音0.1秒の引き継ぎ区間は棄却される
+    assert mock_transcriber.transcribe.call_count == 1
+    assert len(results) == 1
+    print("[OK] 8秒分割の引き継ぎで無音を有音計上しないテスト成功")
+
+
+def test_speech_dropping_below_threshold_is_rejected():
+    """途中で閾値を下回った小振幅発話は、有音時間が最小未満なら棄却されること"""
+    from unittest.mock import MagicMock
+
+    sr = 16000
+    chunk_len = int(sr * 0.1)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, chunk_len)) * 0.1).astype(np.float32)
+    quiet = np.full(chunk_len, 0.005, dtype=np.float32)  # 有効閾値(0.00775)未満
+    silence = np.zeros(chunk_len, dtype=np.float32)
+
+    items = []
+    # 0.2秒だけ閾値を超える
+    for i in range(2):
+        items.append((i * 0.1, speech.copy()))
+    # 以降は閾値付近の小振幅（有音扱いされない）
+    for i in range(2, 11):
+        items.append((i * 0.1, quiet.copy()))
+    for i in range(11, 20):
+        items.append((i * 0.1, silence.copy()))
+
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "幻の文字起こし"
+    processor, results = _build_processor(items, mock_transcriber)
+    _run_worker_loop(processor, wait_sec=1.5)
+
+    assert mock_transcriber.transcribe.call_count == 0
+    assert results == []
+    print("[OK] 閾値付近で落ちた小振幅発話の棄却テスト成功")
+
+
 def test_soft_split_on_short_pause():
     """一定時間話した後の短い息継ぎで区切られ、8秒を待たないこと
 
@@ -477,6 +583,7 @@ def test_pre_buffer_seconds_based():
 if __name__ == "__main__":
     test_preprocess_audio()
     test_effective_threshold_adaptation()
+    test_voiced_threshold_boundary()
     test_compute_boost_gain()
     test_format_elapsed_time()
     test_resample_audio()
@@ -486,6 +593,9 @@ if __name__ == "__main__":
     test_pre_buffer_seconds_based()
     test_transient_noise_is_rejected()
     test_short_acknowledgement_is_kept()
+    test_finalize_segment_min_duration_boundary()
+    test_hard_split_tail_ignores_silence()
+    test_speech_dropping_below_threshold_is_rejected()
     test_soft_split_on_short_pause()
     test_audio_processor_diarization()
     test_audio_processor_vad_and_short_speech()
