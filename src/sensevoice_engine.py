@@ -36,11 +36,12 @@ def recommend_cpu_threads(max_threads: int = DEFAULT_MAX_INFERENCE_THREADS) -> i
 
     録音コールバックとUIスレッドをブロックしないよう全コアは使わず、
     論理コア数の半分（2コア以下では1）を上限 max_threads で頭打ちにする。
+    max_threads が1以下なら常に1を返す。
     """
     cpu_count = os.cpu_count() or 2
-    if cpu_count <= 2:
+    if cpu_count <= 2 or max_threads <= 1:
         return 1
-    return max(2, min(max_threads, cpu_count // 2))
+    return min(max_threads, max(2, cpu_count // 2))
 
 
 def is_meaningful_transcription(text: object) -> bool:

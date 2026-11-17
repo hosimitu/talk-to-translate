@@ -113,7 +113,7 @@ class TranscriptionEngine:
         """選択されているモデルをロード"""
         if self.model_size == "sensevoice":
             if self.sensevoice_engine is None:
-                self.sensevoice_engine = SenseVoiceEngine()
+                self.sensevoice_engine = SenseVoiceEngine(num_threads=self.cpu_threads)
         else:
             # Whisperモデルのロード（CUDA初期化失敗時はCPUへ自動フォールバック）
             if self.whisper_model is None:

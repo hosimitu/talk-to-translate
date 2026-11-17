@@ -91,6 +91,13 @@ def test_recommend_cpu_threads():
         assert recommend_cpu_threads() == 8
         assert recommend_cpu_threads(max_threads=4) == 4
 
+    # 上限が2未満でも頭打ちを守る（1以下は1スレッド）
+    with patch("src.sensevoice_engine.os.cpu_count", return_value=16):
+        assert recommend_cpu_threads(max_threads=2) == 2
+        assert recommend_cpu_threads(max_threads=1) == 1
+        assert recommend_cpu_threads(max_threads=0) == 1
+        assert recommend_cpu_threads(max_threads=-3) == 1
+
     # cpu_count が取得できない環境でも最低限動く
     with patch("src.sensevoice_engine.os.cpu_count", return_value=None):
         assert recommend_cpu_threads() == 1
@@ -98,6 +105,47 @@ def test_recommend_cpu_threads():
     # 実環境でも妥当な範囲に収まる
     assert 1 <= recommend_cpu_threads() <= 8
     print(f"[OK] 推論スレッド数の自動決定テスト成功 (このPC: {recommend_cpu_threads()})")
+
+
+def test_cpu_threads_propagation():
+    """TranscriptionEngine が解決した cpu_threads を SenseVoice / Whisper へ渡すこと"""
+    from unittest.mock import patch
+
+    captured = {}
+
+    class StubSenseVoiceEngine:
+        def __init__(self, num_threads=None):
+            captured["num_threads"] = num_threads
+
+    with patch("src.transcriber.SenseVoiceEngine", StubSenseVoiceEngine), patch(
+        "src.transcriber.recommend_cpu_threads", return_value=5
+    ):
+        # 明示指定した値はそのまま SenseVoice へ渡る
+        engine = TranscriptionEngine(model_size="sensevoice", cpu_threads=3)
+        assert engine.cpu_threads == 3
+        assert captured["num_threads"] == 3
+
+        # 未指定・不正値は recommend_cpu_threads の解決結果を使う
+        engine = TranscriptionEngine(model_size="sensevoice", cpu_threads=None)
+        assert engine.cpu_threads == 5
+        assert captured["num_threads"] == 5
+
+        engine = TranscriptionEngine(model_size="sensevoice", cpu_threads=0)
+        assert engine.cpu_threads == 5
+        assert captured["num_threads"] == 5
+
+    # Whisper 経路にも同じ解決値が渡る
+    with patch("src.transcriber.WhisperModel") as whisper_cls, patch(
+        "src.transcriber.detect_acceleration", return_value=("cpu", "int8")
+    ), patch("src.transcriber.recommend_cpu_threads", return_value=5):
+        engine = TranscriptionEngine(model_size="small", device="cpu", cpu_threads=3)
+        assert engine.cpu_threads == 3
+        assert whisper_cls.call_args.kwargs["cpu_threads"] == 3
+
+        engine = TranscriptionEngine(model_size="small", device="cpu", cpu_threads=None)
+        assert engine.cpu_threads == 5
+        assert whisper_cls.call_args.kwargs["cpu_threads"] == 5
+    print("[OK] cpu_threads の伝播テスト成功")
 
 
 def test_is_meaningful_transcription():
@@ -291,6 +339,7 @@ def test_whisper_transcribe_integration():
 if __name__ == "__main__":
     test_parsers()
     test_recommend_cpu_threads()
+    test_cpu_threads_propagation()
     test_is_meaningful_transcription()
     test_whisper_segment_filter()
     test_whisper_transcribe_integration()
