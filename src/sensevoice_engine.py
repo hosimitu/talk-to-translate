@@ -7,9 +7,10 @@ import os
 import re
 from collections import OrderedDict
 from typing import Optional
-import huggingface_hub
 import numpy as np
 import sherpa_onnx
+
+from src.model_integrity import download_verified
 
 
 # SenseVoice が返す言語表記（<|ja|>, ja, zh-CN など）を翻訳用コードへ対応付ける
@@ -77,6 +78,10 @@ class SenseVoiceEngine:
     REPO_ID = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
     MODEL_FILENAME = "model.int8.onnx"
     TOKENS_FILENAME = "tokens.txt"
+    # 上流 main の差し替えを読み込まないよう commit SHA で固定し、取得後に SHA256 を照合する
+    MODEL_REVISION = "2365baeacb507f821a0c8120fcee3d484dba7a07"
+    MODEL_SHA256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+    TOKENS_SHA256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
 
     def __init__(self, num_threads: Optional[int] = None):
         """
@@ -112,14 +117,18 @@ class SenseVoiceEngine:
         return recognizer
 
     def _build_recognizer(self, language: str) -> sherpa_onnx.OfflineRecognizer:
-        """HuggingFace Hub からモデルを取得し sherpa-onnx でロード"""
-        model_path = huggingface_hub.hf_hub_download(
-            repo_id=self.REPO_ID,
-            filename=self.MODEL_FILENAME,
+        """固定 revision でモデルを取得・照合し、sherpa-onnx でロード"""
+        model_path = download_verified(
+            self.REPO_ID,
+            self.MODEL_FILENAME,
+            self.MODEL_REVISION,
+            self.MODEL_SHA256,
         )
-        tokens_path = huggingface_hub.hf_hub_download(
-            repo_id=self.REPO_ID,
-            filename=self.TOKENS_FILENAME,
+        tokens_path = download_verified(
+            self.REPO_ID,
+            self.TOKENS_FILENAME,
+            self.MODEL_REVISION,
+            self.TOKENS_SHA256,
         )
 
         return sherpa_onnx.OfflineRecognizer.from_sense_voice(

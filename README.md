@@ -180,12 +180,13 @@ python tests/test_diarizer.py
 python tests/test_diarizer_policy.py
 python tests/test_processor.py
 python tests/test_transcriber.py
+python tests/test_model_integrity.py
 python tests/test_translator.py
 python tests/test_ui_config_integration.py
 ```
 
 > `test_diarizer.py` / `test_transcriber.py` / `test_translator.py` の一部はモデルのダウンロードやネットワークに依存します。
-> `test_diarizer_policy.py` / `test_processor.py` / `test_config.py` はオフラインで実行できます。
+> `test_diarizer_policy.py` / `test_processor.py` / `test_config.py` / `test_model_integrity.py` はオフラインで実行できます。
 
 ---
 

@@ -5,10 +5,10 @@ sherpa-onnx (3D-speaker) を使用して、複数人の発話を「話者1」「
 
 import threading
 from typing import Dict, List, Optional
-import huggingface_hub
 import numpy as np
 import sherpa_onnx
 
+from src.model_integrity import download_verified
 from src.sensevoice_engine import recommend_cpu_threads
 
 
@@ -77,6 +77,11 @@ class SpeakerDiarizer:
 
     REPO_ID = "csukuangfj/speaker-embedding-models"
     DEFAULT_MODEL = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx"
+    # 上流 main の差し替えを読み込まないよう commit SHA で固定し、取得後に SHA256 を照合する
+    MODEL_REVISION = "0743f301363dec56491a490f6d6cbc9d67f9a3bf"
+    MODEL_SHA256_BY_FILENAME = {
+        DEFAULT_MODEL: "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+    }
 
     def __init__(
         self,
@@ -144,10 +149,18 @@ class SpeakerDiarizer:
             if self._is_loaded:
                 return
 
+            expected_sha256 = self.MODEL_SHA256_BY_FILENAME.get(self.model_filename)
+            if expected_sha256 is None:
+                raise RuntimeError(
+                    f"検証済みでない話者埋め込みモデルは使用できません: {self.model_filename}"
+                )
+
             print(f"[SpeakerDiarizer] 3D-speaker モデル ({self.model_filename}) をロード中...")
-            model_path = huggingface_hub.hf_hub_download(
-                repo_id=self.REPO_ID,
-                filename=self.model_filename,
+            model_path = download_verified(
+                self.REPO_ID,
+                self.model_filename,
+                self.MODEL_REVISION,
+                expected_sha256,
             )
 
             config = sherpa_onnx.SpeakerEmbeddingExtractorConfig(
