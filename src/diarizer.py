@@ -9,7 +9,7 @@ import numpy as np
 import sherpa_onnx
 
 from src.model_integrity import download_verified
-from src.sensevoice_engine import recommend_cpu_threads
+from src.runtime import DIARIZATION_MAX_THREADS, recommend_cpu_threads
 
 
 def should_update_profile(match_count: int, interval: int) -> bool:
@@ -108,7 +108,7 @@ class SpeakerDiarizer:
         self.num_threads = (
             num_threads
             if isinstance(num_threads, int) and num_threads > 0
-            else recommend_cpu_threads(max_threads=4)
+            else recommend_cpu_threads(max_threads=DIARIZATION_MAX_THREADS)
         )
         self.model_filename = model_filename or self.DEFAULT_MODEL
         self.min_embedding_duration_sec = min_embedding_duration_sec

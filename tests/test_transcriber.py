@@ -9,11 +9,12 @@ from src.transcriber import (
     parse_model_size,
     TranscriptionEngine,
 )
-from src.sensevoice_engine import (
+from src.runtime import (
+    TRANSCRIPTION_MAX_THREADS,
     is_meaningful_transcription,
-    normalize_language,
     recommend_cpu_threads,
 )
+from src.sensevoice_engine import SenseVoiceEngine, normalize_language
 
 
 def test_parsers():
@@ -73,43 +74,43 @@ def test_recommend_cpu_threads():
     from unittest.mock import patch
 
     # 2コア以下の低スペックPCでは録音・UIスレッドを圧迫しないよう1スレッド
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=1):
+    with patch("src.runtime.os.cpu_count", return_value=1):
         assert recommend_cpu_threads() == 1
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=2):
+    with patch("src.runtime.os.cpu_count", return_value=2):
         assert recommend_cpu_threads() == 1
 
     # 4コア以上は論理コア数の半分（上限キャップ付き）
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=4):
+    with patch("src.runtime.os.cpu_count", return_value=4):
         assert recommend_cpu_threads() == 2
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=8):
+    with patch("src.runtime.os.cpu_count", return_value=8):
         assert recommend_cpu_threads() == 4
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=16):
-        assert recommend_cpu_threads() == 8
+    with patch("src.runtime.os.cpu_count", return_value=16):
+        assert recommend_cpu_threads() == TRANSCRIPTION_MAX_THREADS
 
     # 上限は max_threads で頭打ちになる
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=64):
-        assert recommend_cpu_threads() == 8
+    with patch("src.runtime.os.cpu_count", return_value=64):
+        assert recommend_cpu_threads() == TRANSCRIPTION_MAX_THREADS
         assert recommend_cpu_threads(max_threads=4) == 4
 
     # 上限が2未満でも頭打ちを守る（1以下は1スレッド）
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=16):
+    with patch("src.runtime.os.cpu_count", return_value=16):
         assert recommend_cpu_threads(max_threads=2) == 2
         assert recommend_cpu_threads(max_threads=1) == 1
         assert recommend_cpu_threads(max_threads=0) == 1
         assert recommend_cpu_threads(max_threads=-3) == 1
 
     # cpu_count が取得できない環境でも最低限動く
-    with patch("src.sensevoice_engine.os.cpu_count", return_value=None):
+    with patch("src.runtime.os.cpu_count", return_value=None):
         assert recommend_cpu_threads() == 1
 
     # 実環境でも妥当な範囲に収まる
-    assert 1 <= recommend_cpu_threads() <= 8
+    assert 1 <= recommend_cpu_threads() <= TRANSCRIPTION_MAX_THREADS
     print(f"[OK] 推論スレッド数の自動決定テスト成功 (このPC: {recommend_cpu_threads()})")
 
 
 def test_cpu_threads_propagation():
     """TranscriptionEngine が解決した cpu_threads を SenseVoice / Whisper へ渡すこと"""
-    from unittest.mock import patch
+    from unittest.mock import call, patch
 
     captured = {}
 
@@ -119,7 +120,7 @@ def test_cpu_threads_propagation():
 
     with patch("src.transcriber.SenseVoiceEngine", StubSenseVoiceEngine), patch(
         "src.transcriber.recommend_cpu_threads", return_value=5
-    ):
+    ) as recommend:
         # 明示指定した値はそのまま SenseVoice へ渡る
         engine = TranscriptionEngine(model_size="sensevoice", cpu_threads=3)
         assert engine.cpu_threads == 3
@@ -134,6 +135,12 @@ def test_cpu_threads_propagation():
         assert engine.cpu_threads == 5
         assert captured["num_threads"] == 5
 
+        # 文字起こし用の上限が src.runtime の定数から渡る
+        assert recommend.call_args_list == [
+            call(max_threads=TRANSCRIPTION_MAX_THREADS),
+            call(max_threads=TRANSCRIPTION_MAX_THREADS),
+        ]
+
     # Whisper 経路にも同じ解決値が渡る
     with patch("src.transcriber.WhisperModel") as whisper_cls, patch(
         "src.transcriber.detect_acceleration", return_value=("cpu", "int8")
@@ -146,6 +153,19 @@ def test_cpu_threads_propagation():
         assert engine.cpu_threads == 5
         assert whisper_cls.call_args.kwargs["cpu_threads"] == 5
     print("[OK] cpu_threads の伝播テスト成功")
+
+
+def test_sensevoice_thread_cap():
+    """SenseVoice のスレッド上限が src.runtime の定数から渡されること"""
+    from unittest.mock import patch
+
+    with patch(
+        "src.sensevoice_engine.recommend_cpu_threads", return_value=3
+    ) as recommend, patch.object(SenseVoiceEngine, "_load_model"):
+        engine = SenseVoiceEngine()
+    recommend.assert_called_once_with(max_threads=TRANSCRIPTION_MAX_THREADS)
+    assert engine.num_threads == 3
+    print("[OK] SenseVoice スレッド上限のテスト成功")
 
 
 def test_is_meaningful_transcription():
@@ -340,6 +360,7 @@ if __name__ == "__main__":
     test_parsers()
     test_recommend_cpu_threads()
     test_cpu_threads_propagation()
+    test_sensevoice_thread_cap()
     test_is_meaningful_transcription()
     test_whisper_segment_filter()
     test_whisper_transcribe_integration()

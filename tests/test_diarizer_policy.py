@@ -7,6 +7,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.diarizer import SpeakerDiarizer, extract_embedding_window, should_update_profile
+from src.runtime import DIARIZATION_MAX_THREADS
 
 
 def test_should_update_profile():
@@ -114,7 +115,7 @@ def test_diarizer_policy_defaults():
     # 埋め込み計算の音声長上限（長い発話での推論時間を抑える）
     assert diarizer.max_embedding_duration_sec == 3.5
     # スレッド数はCPUコア数から自動決定される（低スペックPCを圧迫しない範囲）
-    assert 1 <= diarizer.num_threads <= 4
+    assert 1 <= diarizer.num_threads <= DIARIZATION_MAX_THREADS
 
     # パラメータ上書き
     custom = SpeakerDiarizer(
@@ -132,9 +133,21 @@ def test_diarizer_policy_defaults():
     print("[OK] 話者識別ポリシーのデフォルト値テスト成功")
 
 
+def test_diarization_thread_cap():
+    """話者識別のスレッド上限が src.runtime の定数から渡されること"""
+    from unittest.mock import patch
+
+    with patch("src.diarizer.recommend_cpu_threads", return_value=2) as recommend:
+        diarizer = SpeakerDiarizer()
+    recommend.assert_called_once_with(max_threads=DIARIZATION_MAX_THREADS)
+    assert diarizer.num_threads == 2
+    print("[OK] 話者識別スレッド上限のテスト成功")
+
+
 if __name__ == "__main__":
     test_should_update_profile()
     test_extract_embedding_window()
     test_extract_embedding_window_trailing_audio()
     test_diarizer_policy_defaults()
+    test_diarization_thread_cap()
     print("すべての話者識別ポリシーテストが正常に通過しました！")
