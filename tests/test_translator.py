@@ -225,6 +225,46 @@ def test_mymemory_uses_https():
     print("[OK] MyMemoryフォールバックのHTTPS強制テスト成功")
 
 
+def test_cloud_translation_error_log_does_not_leak_text():
+    """MyMemory の例外文字列（URL の q=本文）をログへ出力しないこと"""
+    import contextlib
+    import io
+    from unittest.mock import patch
+
+    secret = "秘密の会話ログ"
+    translator = TextTranslator(engine="cloud")
+
+    class LeakyError(Exception):
+        pass
+
+    class StubMyMemoryTranslator:
+        def __init__(self, source=None, target=None):
+            self._base_url = "https://api.mymemory.translated.net/get"
+
+        def translate(self, text):
+            raise LeakyError(
+                "HTTPSConnectionPool: Max retries exceeded with url: "
+                f"/get?q={secret}&langpair=ja-JP|en-US"
+            )
+
+    output = io.StringIO()
+    with patch("src.translator.GoogleTranslator") as google_cls, patch(
+        "src.translator.MyMemoryTranslator", StubMyMemoryTranslator
+    ), contextlib.redirect_stdout(output):
+        google_cls.return_value.translate.side_effect = RuntimeError("429")
+        result = translator._translate_cloud(secret, target_lang="en", source_lang="ja")
+
+    logged = output.getvalue()
+    # 戻り値は従来どおり本文を含む（画面表示用）
+    assert result == f"[翻訳不可: {secret}]"
+    # ログには本文・クエリ・例外文字列を残さず、例外の種類だけを残す
+    assert secret not in logged
+    assert "q=" not in logged
+    assert "429" not in logged
+    assert "MyMemory翻訳エラー: LeakyError" in logged
+    print("[OK] クラウド翻訳エラーログの本文非漏洩テスト成功")
+
+
 def test_local_device_resolution():
     """ローカル翻訳のデバイス判定が cpu / cuda のいずれかを返すこと"""
     device = resolve_local_device()
@@ -237,6 +277,7 @@ if __name__ == "__main__":
     test_cache_and_same_language_skip()
     test_language_maps_for_ko_yue()
     test_mymemory_uses_https()
+    test_cloud_translation_error_log_does_not_leak_text()
     test_local_device_resolution()
     test_circuit_breaker()
     test_local_nllb_translator()

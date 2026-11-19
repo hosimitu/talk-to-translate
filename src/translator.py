@@ -332,7 +332,8 @@ class TextTranslator:
             if translated:
                 return translated
         except Exception as e_mm:
-            print(f"[TextTranslator] MyMemory翻訳エラー: {e_mm}")
+            # 例外文字列にはリクエストURL（q=文字起こし本文）が含まれ得るため、種類だけを記録する
+            print(f"[TextTranslator] MyMemory翻訳エラー: {type(e_mm).__name__}")
 
         return f"[翻訳不可: {text}]"
 
