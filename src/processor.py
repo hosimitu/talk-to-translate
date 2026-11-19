@@ -26,6 +26,7 @@ def preprocess_audio(
     target_peak: float = 0.9,
     max_gain: float = 6.0,
     gain: Optional[float] = None,
+    noise_floor: Optional[float] = None,
 ) -> np.ndarray:
     """
     音声波形の前処理（DCオフセット除去＆自動音量ノーマライズ）
@@ -33,6 +34,7 @@ def preprocess_audio(
     :param target_peak: 目標とするピーク音量 (0.0〜1.0)
     :param max_gain: 最大増幅率
     :param gain: 増幅率の明示指定（Noneの場合は target_peak/max_gain から算出）
+    :param noise_floor: 環境音の推定値。指定時は compute_boost_gain で SNR に応じて増幅率を制限する
     :return: 前処理済みの音声信号
     """
     if len(audio) == 0:
@@ -44,7 +46,12 @@ def preprocess_audio(
         return centered
 
     if gain is None:
-        gain = min(target_peak / peak, max_gain)
+        if noise_floor is not None:
+            gain = compute_boost_gain(
+                peak, noise_floor, target_peak=target_peak, max_gain=max_gain
+            )
+        else:
+            gain = min(target_peak / peak, max_gain)
     return apply_normalization(centered, gain)
 
 
@@ -351,13 +358,9 @@ class AudioProcessor:
 
         raw_audio = np.concatenate(buffer)
 
-        # 1. 音量ブースト（ノイズフロアとの差に応じて増幅率を制限し、
-        #    無音に近い短いセグメントが過剰増幅されてハルシネーションを起こすのを防ぐ）
-        #    DCオフセット除去は1度だけ行い、正規化も同じ配列を再利用する。
-        centered = raw_audio - np.mean(raw_audio)
-        peak = float(np.max(np.abs(centered)))
-        boost_gain = compute_boost_gain(peak, self.noise_floor)
-        audio_data = apply_normalization(centered, boost_gain)
+        # 1. DCオフセット除去と音量ブースト
+        #    （ノイズフロアとの差に応じた増幅率の制限を含め、正規化は preprocess_audio に一本化）
+        audio_data = preprocess_audio(raw_audio, noise_floor=self.noise_floor)
 
         # 2. 話者識別（ダイアライザーが有効な場合）
         speaker_tag = ""

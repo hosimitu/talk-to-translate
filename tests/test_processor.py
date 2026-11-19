@@ -30,6 +30,58 @@ def test_preprocess_audio():
     assert np.all(zero_out == 0)
     print("[OK] 無音信号の安全処理確認")
 
+    # 4. ノイズフロア指定時は compute_boost_gain と同じ SNR 制限がかかる（本番経路）
+    from src.processor import apply_normalization, compute_boost_gain
+
+    centered = small_signal - np.mean(small_signal)
+    peak = float(np.max(np.abs(centered)))
+    expected_gain = compute_boost_gain(peak, 0.001)
+    assert np.allclose(
+        preprocess_audio(small_signal, noise_floor=0.001),
+        apply_normalization(centered, expected_gain),
+    )
+
+    # フロアと区別できない小振幅では増幅を抑える
+    tiny = (np.sin(np.linspace(0, 2 * np.pi * 440, 1600)) * 0.002).astype(np.float32)
+    tiny_centered = tiny - np.mean(tiny)
+    tiny_peak = float(np.max(np.abs(tiny_centered)))
+    tiny_gain = compute_boost_gain(tiny_peak, 0.0015)
+    assert tiny_gain <= 1.2
+    assert np.allclose(
+        preprocess_audio(tiny, noise_floor=0.0015),
+        apply_normalization(tiny_centered, tiny_gain),
+    )
+    print("[OK] ノイズフロア指定時のブースト制限テスト成功")
+
+
+def test_process_speech_uses_preprocess_audio():
+    """本番の正規化が preprocess_audio 経由であること（旧経路の二重実装を防ぐ）"""
+    from unittest.mock import MagicMock, patch
+    from src.processor import AudioProcessor, preprocess_audio
+    from src.audio import AudioRecorder
+
+    sr = 16000
+    mock_transcriber = MagicMock()
+    mock_transcriber.transcribe.return_value = "はい"
+    processor = AudioProcessor(
+        recorder=AudioRecorder(sample_rate=sr),
+        transcriber=mock_transcriber,
+        on_transcription_callback=lambda text: None,
+    )
+
+    calls = []
+
+    def recording(audio, **kwargs):
+        calls.append(kwargs)
+        return preprocess_audio(audio, **kwargs)
+
+    with patch("src.processor.preprocess_audio", side_effect=recording):
+        processor._process_speech([np.full(1600, 0.1, dtype=np.float32)], sr)
+
+    assert calls == [{"noise_floor": processor.noise_floor}]
+    assert mock_transcriber.transcribe.call_count == 1
+    print("[OK] 本番の正規化経路（preprocess_audio）のテスト成功")
+
 
 def test_effective_threshold_adaptation():
     """騒がしい環境でも閾値が追従して上がること"""
@@ -652,6 +704,7 @@ def test_pre_buffer_seconds_based():
 
 if __name__ == "__main__":
     test_preprocess_audio()
+    test_process_speech_uses_preprocess_audio()
     test_effective_threshold_adaptation()
     test_voiced_threshold_boundary()
     test_compute_boost_gain()
