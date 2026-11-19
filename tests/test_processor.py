@@ -1,5 +1,6 @@
 """音声前処理モジュールの単体テストスクリプト"""
 
+import threading
 import time
 
 import numpy as np
@@ -248,24 +249,27 @@ class _FakeRecorder:
 
     def __init__(self, items):
         self._items = list(items)
+        # 全チャンクを返し終えたことをテスト側へ通知する（固定 sleep を避ける）
+        self.exhausted = threading.Event()
 
     def get_chunk_with_timestamp(self, timeout=0.1):
         if not self._items:
-            import time as _time
-            _time.sleep(0.01)  # チャンク切れ時のスピン待機を軽減
+            self.exhausted.set()
+            time.sleep(0.005)  # 停止指示を受け取るまでのビジーループを軽減
             return None, None
         return self._items.pop(0)
 
 
-def _run_worker_loop(processor, wait_sec=1.0):
-    """_worker_loop をスレッドで実行し、全チャンク消化後に停止する"""
-    import threading
-
+def _run_worker_loop(processor, timeout=5.0):
+    """_worker_loop をスレッドで実行し、全チャンク消化後に決定的に停止する"""
     thread = threading.Thread(target=processor._worker_loop, daemon=True)
     thread.start()
-    time.sleep(wait_sec)
+    assert processor.recorder.exhausted.wait(timeout), (
+        "ワーカーが音声チャンクを消化しませんでした"
+    )
     processor._is_running = False
     thread.join(timeout=2.0)
+    assert not thread.is_alive(), "ワーカースレッドが停止しませんでした"
 
 
 def _build_processor(items, mock_transcriber):
@@ -283,22 +287,30 @@ def _build_processor(items, mock_transcriber):
 
 
 def test_split_overlap_and_timestamps():
-    """8秒分割で末尾がオーバーラップし、発話に時刻接頭辞が付くこと"""
+    """8秒分割で末尾が引き継がれ、発話に時刻接頭辞が付くこと"""
     from unittest.mock import MagicMock
     import re as _re
-    from src.processor import AudioProcessor
+    from src.processor import AudioProcessor, compute_boost_gain, format_elapsed_time
 
     sr = 16000
-    silence = np.zeros(16000, dtype=np.float32)
-    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, 16000)) * 0.1).astype(np.float32)
+    lead_silence_chunks = 2
+    speech_chunks = 20
+    trailing_silence_chunks = 3
+
+    silence = np.zeros(sr, dtype=np.float32)
+    speech = (np.sin(np.linspace(0, 2 * np.pi * 440, sr)) * 0.1).astype(np.float32)
+    chunk_sec = len(speech) / sr
 
     items = []
-    for t in range(2):                       # 無音 2秒 (t=0, 1)
-        items.append((float(t), silence.copy()))
-    for t in range(2, 22):                   # 発話 20秒 (t=2〜21)
-        items.append((float(t), speech.copy()))
-    for t in range(22, 25):                  # 途中無音 (発話終了判定)
-        items.append((float(t), silence.copy()))
+    for i in range(lead_silence_chunks):  # 発話前の無音
+        items.append((float(i), silence.copy()))
+    for i in range(lead_silence_chunks, lead_silence_chunks + speech_chunks):  # 発話
+        items.append((float(i), speech.copy()))
+    for i in range(  # 発話終了判定用の無音
+        lead_silence_chunks + speech_chunks,
+        lead_silence_chunks + speech_chunks + trailing_silence_chunks,
+    ):
+        items.append((float(i), silence.copy()))
 
     mock_transcriber = MagicMock()
     mock_transcriber.transcribe.return_value = "こんにちは"
@@ -316,20 +328,66 @@ def test_split_overlap_and_timestamps():
     )
     processor._is_running = True
     processor._recording_started_at = 0.0  # start() 相当
+
+    # どのチャンクがどの区間に渡ったかを記録し、被覆（ギャップ・overlap）を検証する
+    chunk_indices = {id(chunk): i for i, (_, chunk) in enumerate(items)}
+    spans = []
+    original_process = processor._process_speech
+
+    def record_process(buffer, sample_rate, speech_start_time=None):
+        indices = [chunk_indices[id(chunk)] for chunk in buffer]
+        spans.append((indices[0], indices[-1]))
+        return original_process(buffer, sample_rate, speech_start_time)
+
+    processor._process_speech = record_process
+    initial_noise_floor = processor.noise_floor
     _run_worker_loop(processor)
+
+    pre_chunks = max(1, int(round(processor.pre_buffer_sec / chunk_sec)))
+    overlap_chunks = int(np.ceil(processor.split_overlap_sec / chunk_sec))
+    speech_start_index = lead_silence_chunks
+    speech_end_index = lead_silence_chunks + speech_chunks - 1
 
     # 20秒の発話 → 最低2回に分割される
     assert len(segments) >= 2
-    # 先頭区間: 発話前に構えた pre_buffer 1チャンク（無音 t=1）+ 発話 t=2〜9 の 9チャンク
-    assert len(segments[0]) == int(9.0 * sr)
-    # 以降の区間も最大発話時間＋オーバーラップ分を超えない
+    assert len(spans) == len(segments)
+
+    # 先頭区間は pre_buffer 分だけ発話開始前にさかのぼる
+    assert spans[0][0] == speech_start_index - pre_chunks
+    # 区間はギャップなくつながり、重なりも設定値＋チャンク粒度以内に収まる
+    for (_, prev_end), (next_start, _) in zip(spans, spans[1:]):
+        assert next_start <= prev_end + 1, "区間の間にギャップがあります"
+        assert next_start >= prev_end + 1 - overlap_chunks, (
+            "オーバーラップが上限を超えています"
+        )
+    # 末尾の発話まで途切れずに含まれる
+    assert spans[-1][1] >= speech_end_index, "末尾の発話が含まれていません"
+
+    # 先頭区間は最大発話時間に達して分割され、チャンク1個分の余裕に収まる
+    assert len(segments[0]) >= int(processor.max_speech_duration_sec * sr)
+    assert len(segments[0]) <= int(
+        (processor.max_speech_duration_sec + chunk_sec) * sr
+    )
+    # 以降の区間も最大発話時間＋オーバーラップ＋チャンク粒度を超えない
     for seg in segments[1:]:
-        assert len(seg) <= int((8.0 + 0.5) * sr)
-    # 分割部は削除ではなく引き継ぎのため、区間のつながりで音声が欠けていない
-    # （2区間目の先頭は前区間末尾の直後のチャンク＝発話波形そのもの。ブースト×6済み）
-    assert np.allclose(segments[1][:sr], speech * 6.0, atol=1e-5)
-    # 時刻接頭辞: 最初の発話は t=2.0 から → "[00:02] " で始まる
-    assert results[0].startswith("[00:02] こんにちは")
+        assert len(seg) <= int(
+            (
+                processor.max_speech_duration_sec
+                + processor.split_overlap_sec
+                + chunk_sec
+            )
+            * sr
+        )
+
+    # 引き継ぎ区間の先頭は前区間末尾のチャンクそのもの（ブースト率は実装から導出）
+    expected_gain = compute_boost_gain(
+        float(np.max(np.abs(speech - np.mean(speech)))), initial_noise_floor
+    )
+    assert np.allclose(segments[1][:sr], speech * expected_gain, atol=1e-5)
+
+    # 時刻接頭辞: 最初の発話の時刻から始まる
+    expected_prefix = f"[{format_elapsed_time(float(speech_start_index))}] "
+    assert results[0].startswith(expected_prefix + "こんにちは")
     assert all(_re.match(r"^\[\d{1,3}:\d{2}(?::\d{2})?\] ", text) for text in results)
     print(f"[OK] 8秒分割オーバーラップとタイムスタンプのテスト成功: {len(segments)}区間")
 
@@ -361,7 +419,7 @@ def test_transient_noise_is_rejected():
     mock_transcriber = MagicMock()
     mock_transcriber.transcribe.return_value = "幻の文字起こし"
     processor, results = _build_processor(items, mock_transcriber)
-    _run_worker_loop(processor, wait_sec=1.5)
+    _run_worker_loop(processor)
 
     # 推論が一度も呼ばれないこと（=CPU を使わない）
     assert mock_transcriber.transcribe.call_count == 0, (
@@ -392,7 +450,7 @@ def test_short_acknowledgement_is_kept():
     mock_transcriber = MagicMock()
     mock_transcriber.transcribe.return_value = "はい"
     processor, results = _build_processor(items, mock_transcriber)
-    _run_worker_loop(processor, wait_sec=1.5)
+    _run_worker_loop(processor)
 
     assert mock_transcriber.transcribe.call_count == 1
     assert len(results) == 1 and "はい" in results[0]
@@ -455,7 +513,7 @@ def test_hard_split_tail_ignores_silence():
     mock_transcriber = MagicMock()
     mock_transcriber.transcribe.return_value = "こんにちは"
     processor, results = _build_processor(items, mock_transcriber)
-    _run_worker_loop(processor, wait_sec=1.5)
+    _run_worker_loop(processor)
 
     # 先頭区間だけが推論され、有音0.1秒の引き継ぎ区間は棄却される
     assert mock_transcriber.transcribe.call_count == 1
@@ -486,7 +544,7 @@ def test_speech_dropping_below_threshold_is_rejected():
     mock_transcriber = MagicMock()
     mock_transcriber.transcribe.return_value = "幻の文字起こし"
     processor, results = _build_processor(items, mock_transcriber)
-    _run_worker_loop(processor, wait_sec=1.5)
+    _run_worker_loop(processor)
 
     assert mock_transcriber.transcribe.call_count == 0
     assert results == []
@@ -531,13 +589,13 @@ def test_soft_split_on_short_pause():
 
     processor, results = _build_processor(items, mock_transcriber)
     processor._recording_started_at = 0.0
-    _run_worker_loop(processor, wait_sec=1.5)
+    _run_worker_loop(processor)
 
     # 8秒のハードスプリットを待たず、息継ぎの時点で区間が確定している
     assert len(segments) >= 1, "ソフトスプリットで区間が確定しませんでした"
     assert len(results) >= 1
-    # 最初の区間はハードスプリットの8秒より明確に短い
-    assert len(segments[0]) < int(7.0 * sr)
+    # 最初の区間はハードスプリットの最大発話時間より明確に短い
+    assert len(segments[0]) < int(processor.max_speech_duration_sec * sr)
     print(
         f"[OK] 息継ぎによるソフトスプリットのテスト成功: "
         f"{len(segments)}区間 / 先頭 {len(segments[0])/sr:.2f}秒"
@@ -573,9 +631,21 @@ def test_pre_buffer_seconds_based():
 
     assert len(processor.transcriber.transcribe.call_args_list) == 1
     audio = processor.transcriber.transcribe.call_args_list[0][0][0]
-    # 保持チャンク: pre_buffer 0.3秒→1チャンク + 発話2 + 終了判定用無音2 = 5チャンク (2.5秒)
-    assert len(audio) == chunk_len * 5
-    # 冒頭に発話前 0.3 秒以上（実装では1チャンク=0.5秒）が含まれている
+    # 保持チャンク数は pre_buffer_sec とシナリオ（発話2＋終了判定用無音2）から導出する
+    chunk_sec = chunk_len / sr
+    pre_chunks = max(1, int(round(processor.pre_buffer_sec / chunk_sec)))
+    speech_chunks = 2
+    trailing_silence_chunks = 2
+    expected_chunks = pre_chunks + speech_chunks + trailing_silence_chunks
+    assert len(audio) == chunk_len * expected_chunks
+    # 冒頭の pre_buffer 分は無音（DC除去後の一定値）で、発話区間が欠けずに含まれている
+    assert np.ptp(audio[: pre_chunks * chunk_len]) < 1e-6
+    assert (
+        np.count_nonzero(
+            audio[pre_chunks * chunk_len : (pre_chunks + speech_chunks) * chunk_len]
+        )
+        > 0
+    )
     assert len(results) == 1
     print(f"[OK] 秒基準の発話前バッファのテスト成功 (長さ {len(audio)} サンプル = {len(audio)/sr:.1f}秒)")
 
