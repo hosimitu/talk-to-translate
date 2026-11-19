@@ -10,7 +10,13 @@ import time
 from collections import OrderedDict
 from typing import Callable, Optional
 from deep_translator import GoogleTranslator, MyMemoryTranslator
+from deep_translator.constants import BASE_URLS as _DEEP_TRANSLATOR_BASE_URLS
 from src.config import TRANSLATION_ENGINES
+
+# deep_translator の MyMemory 既定 URL は http:// で、文字起こし本文を q= クエリに
+# 載せたまま平文送信してしまう。HTTPS へ上書きして平文送信を禁止する。
+MYMEMORY_HTTPS_BASE_URL = "https://api.mymemory.translated.net/get"
+_DEEP_TRANSLATOR_BASE_URLS["MYMEMORY"] = MYMEMORY_HTTPS_BASE_URL
 
 # UIの選択肢（src/config.py）と NLLB モデルの対応表（クラウドは None）
 _NLLB_MODEL_BY_ENGINE_LABEL = dict(
@@ -93,6 +99,15 @@ def resolve_local_device() -> str:
         return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
     except Exception:
         return "cpu"
+
+
+def _ensure_mymemory_https(translator) -> None:
+    """MyMemory の送信先が HTTPS であることを検証する（平文 http 送信の禁止）"""
+    base_url = str(getattr(translator, "_base_url", "") or "")
+    if not base_url.lower().startswith("https://"):
+        raise RuntimeError(
+            f"MyMemory のエンドポイントが HTTPS ではありません: {base_url or '(未設定)'}"
+        )
 
 
 class LocalNLLBTranslator:
@@ -312,11 +327,13 @@ class TextTranslator:
                 return text
 
             mm_translator = MyMemoryTranslator(source=s_lang, target=t_lang)
+            _ensure_mymemory_https(mm_translator)
             translated = mm_translator.translate(text)
             if translated:
                 return translated
         except Exception as e_mm:
-            print(f"[TextTranslator] MyMemory翻訳エラー: {e_mm}")
+            # 例外文字列にはリクエストURL（q=文字起こし本文）が含まれ得るため、種類だけを記録する
+            print(f"[TextTranslator] MyMemory翻訳エラー: {type(e_mm).__name__}")
 
         return f"[翻訳不可: {text}]"
 

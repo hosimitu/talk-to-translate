@@ -7,12 +7,12 @@ from typing import Optional
 import numpy as np
 from faster_whisper import WhisperModel
 from src.config import TRANSCRIPTION_MODELS
-from src.sensevoice_engine import (
-    SenseVoiceEngine,
+from src.runtime import (
+    TRANSCRIPTION_MAX_THREADS,
     is_meaningful_transcription,
-    normalize_language,
     recommend_cpu_threads,
 )
+from src.sensevoice_engine import SenseVoiceEngine, normalize_language
 
 
 # Whisper のハルシネーション判定しきい値。
@@ -97,7 +97,7 @@ class TranscriptionEngine:
         self.cpu_threads = (
             cpu_threads
             if isinstance(cpu_threads, int) and cpu_threads > 0
-            else recommend_cpu_threads()
+            else recommend_cpu_threads(max_threads=TRANSCRIPTION_MAX_THREADS)
         )
 
         # 直近の文字起こしで検出された言語（翻訳側のソース言語推定に利用）
@@ -113,7 +113,7 @@ class TranscriptionEngine:
         """選択されているモデルをロード"""
         if self.model_size == "sensevoice":
             if self.sensevoice_engine is None:
-                self.sensevoice_engine = SenseVoiceEngine()
+                self.sensevoice_engine = SenseVoiceEngine(num_threads=self.cpu_threads)
         else:
             # Whisperモデルのロード（CUDA初期化失敗時はCPUへ自動フォールバック）
             if self.whisper_model is None:

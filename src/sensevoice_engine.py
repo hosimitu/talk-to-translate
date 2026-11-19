@@ -3,13 +3,18 @@ Talk-to-Translate SenseVoice 音声認識モジュール
 sherpa-onnx を使用して SenseVoice-Small (ONNX int8) による超低遅延・高精度な文字起こしを提供します。
 """
 
-import os
 import re
 from collections import OrderedDict
 from typing import Optional
-import huggingface_hub
 import numpy as np
 import sherpa_onnx
+
+from src.model_integrity import download_verified
+from src.runtime import (
+    TRANSCRIPTION_MAX_THREADS,
+    is_meaningful_transcription,
+    recommend_cpu_threads,
+)
 
 
 # SenseVoice が返す言語表記（<|ja|>, ja, zh-CN など）を翻訳用コードへ対応付ける
@@ -21,39 +26,6 @@ _LANGUAGE_CODE_MAP = {
     "ko": "ko",
     "yue": "yue",
 }
-
-# 語を構成する文字（英数字・かな・漢字・ハングル等）。アンダースコアは語とみなさない。
-_MEANINGFUL_TEXT_PATTERN = re.compile(r"[^\W_]", re.UNICODE)
-
-# 推論スレッド数の既定上限。実測では16スレッド指定より8スレッドの方が高速だった
-# （スレッド競合により 8スレッド 179ms に対し 16スレッド 208ms）。
-DEFAULT_MAX_INFERENCE_THREADS = 8
-
-
-def recommend_cpu_threads(max_threads: int = DEFAULT_MAX_INFERENCE_THREADS) -> int:
-    """
-    CPU論理コア数から推論スレッド数の推奨値を求める。
-
-    録音コールバックとUIスレッドをブロックしないよう全コアは使わず、
-    論理コア数の半分（2コア以下では1）を上限 max_threads で頭打ちにする。
-    """
-    cpu_count = os.cpu_count() or 2
-    if cpu_count <= 2:
-        return 1
-    return max(2, min(max_threads, cpu_count // 2))
-
-
-def is_meaningful_transcription(text: object) -> bool:
-    """
-    文字起こし結果が語を構成する文字を含むかを判定する。
-
-    SenseVoice / Whisper は非発話音や環境音に対して "。" や "..." のような
-    句読点・記号だけを出力することがある。これを弾いて無意味な表示や翻訳を防ぐ。
-    """
-    if not isinstance(text, str):
-        return False
-    return _MEANINGFUL_TEXT_PATTERN.search(text) is not None
-
 
 def normalize_language(value: object) -> Optional[str]:
     """言語タグ・言語コードを翻訳用コードへ正規化する（不明・auto は None）"""
@@ -76,6 +48,10 @@ class SenseVoiceEngine:
     REPO_ID = "csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
     MODEL_FILENAME = "model.int8.onnx"
     TOKENS_FILENAME = "tokens.txt"
+    # 上流 main の差し替えを読み込まないよう commit SHA で固定し、取得後に SHA256 を照合する
+    MODEL_REVISION = "2365baeacb507f821a0c8120fcee3d484dba7a07"
+    MODEL_SHA256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51"
+    TOKENS_SHA256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc"
 
     def __init__(self, num_threads: Optional[int] = None):
         """
@@ -85,7 +61,7 @@ class SenseVoiceEngine:
         self.num_threads = (
             num_threads
             if isinstance(num_threads, int) and num_threads > 0
-            else recommend_cpu_threads()
+            else recommend_cpu_threads(max_threads=TRANSCRIPTION_MAX_THREADS)
         )
         self.recognizer: Optional[sherpa_onnx.OfflineRecognizer] = None
         self._current_language = "auto"
@@ -111,14 +87,18 @@ class SenseVoiceEngine:
         return recognizer
 
     def _build_recognizer(self, language: str) -> sherpa_onnx.OfflineRecognizer:
-        """HuggingFace Hub からモデルを取得し sherpa-onnx でロード"""
-        model_path = huggingface_hub.hf_hub_download(
-            repo_id=self.REPO_ID,
-            filename=self.MODEL_FILENAME,
+        """固定 revision でモデルを取得・照合し、sherpa-onnx でロード"""
+        model_path = download_verified(
+            self.REPO_ID,
+            self.MODEL_FILENAME,
+            self.MODEL_REVISION,
+            self.MODEL_SHA256,
         )
-        tokens_path = huggingface_hub.hf_hub_download(
-            repo_id=self.REPO_ID,
-            filename=self.TOKENS_FILENAME,
+        tokens_path = download_verified(
+            self.REPO_ID,
+            self.TOKENS_FILENAME,
+            self.MODEL_REVISION,
+            self.TOKENS_SHA256,
         )
 
         return sherpa_onnx.OfflineRecognizer.from_sense_voice(

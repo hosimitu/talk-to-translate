@@ -7,6 +7,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.diarizer import SpeakerDiarizer, extract_embedding_window, should_update_profile
+from src.runtime import DIARIZATION_MAX_THREADS
 
 
 def test_should_update_profile():
@@ -67,6 +68,42 @@ def test_extract_embedding_window():
     print(f"[OK] 埋め込み窓の切り出しテスト成功 (有音 {loud_in_window} サンプルを保持)")
 
 
+def test_extract_embedding_window_trailing_audio():
+    """末尾が hop の倍数でない長さでも、末尾の有音を100%含む窓が選ばれること"""
+    sr = 16000
+    max_sec = 3.5
+    max_samples = int(round(max_sec * sr))
+    tail_samples = int(0.4 * sr)  # 末尾0.4秒だけ有音
+
+    for total_sec in (3.6, 8.0, 8.3, 10.25):
+        audio = np.zeros(int(sr * total_sec), dtype=np.float32)
+        audio[-tail_samples:] = 0.5
+        window = extract_embedding_window(audio, sr, max_duration_sec=max_sec)
+        assert len(window) == max_samples
+        kept = int(np.count_nonzero(window))
+        assert kept == tail_samples, (
+            f"{total_sec}s: 末尾の有音を取りこぼしています: {kept}/{tail_samples}"
+        )
+
+    # hop を変えても同じく末尾を取りこぼさない
+    audio = np.zeros(int(sr * 8.3), dtype=np.float32)
+    audio[-tail_samples:] = 0.5
+    window = extract_embedding_window(
+        audio, sr, max_duration_sec=max_sec, hop_sec=1.0
+    )
+    assert int(np.count_nonzero(window)) == tail_samples
+
+    # 末尾揃えの候補を足しても、中央の有音区間の選択は変わらない
+    audio = np.zeros(int(sr * 8.3), dtype=np.float32)
+    audio[int(sr * 3.0) : int(sr * 5.0)] = 0.5
+    window = extract_embedding_window(audio, sr, max_duration_sec=max_sec)
+    loud_in_window = int(np.count_nonzero(window))
+    assert loud_in_window >= int(sr * 2.0 * 0.9), (
+        f"中央の有音区間が十分に含まれていません: {loud_in_window} サンプル"
+    )
+    print("[OK] 埋め込み窓の末尾有音保持テスト成功")
+
+
 def test_diarizer_policy_defaults():
     """過学習抑制のデフォルト値と初期状態"""
     diarizer = SpeakerDiarizer()
@@ -78,7 +115,7 @@ def test_diarizer_policy_defaults():
     # 埋め込み計算の音声長上限（長い発話での推論時間を抑える）
     assert diarizer.max_embedding_duration_sec == 3.5
     # スレッド数はCPUコア数から自動決定される（低スペックPCを圧迫しない範囲）
-    assert 1 <= diarizer.num_threads <= 4
+    assert 1 <= diarizer.num_threads <= DIARIZATION_MAX_THREADS
 
     # パラメータ上書き
     custom = SpeakerDiarizer(
@@ -96,8 +133,21 @@ def test_diarizer_policy_defaults():
     print("[OK] 話者識別ポリシーのデフォルト値テスト成功")
 
 
+def test_diarization_thread_cap():
+    """話者識別のスレッド上限が src.runtime の定数から渡されること"""
+    from unittest.mock import patch
+
+    with patch("src.diarizer.recommend_cpu_threads", return_value=2) as recommend:
+        diarizer = SpeakerDiarizer()
+    recommend.assert_called_once_with(max_threads=DIARIZATION_MAX_THREADS)
+    assert diarizer.num_threads == 2
+    print("[OK] 話者識別スレッド上限のテスト成功")
+
+
 if __name__ == "__main__":
     test_should_update_profile()
     test_extract_embedding_window()
+    test_extract_embedding_window_trailing_audio()
     test_diarizer_policy_defaults()
+    test_diarization_thread_cap()
     print("すべての話者識別ポリシーテストが正常に通過しました！")
